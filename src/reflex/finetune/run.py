@@ -120,10 +120,18 @@ def _build_lerobot_command(cfg: FinetuneConfig) -> list[str]:
     # root, and give lerobot a subdirectory it creates fresh on each run.
     lerobot_output = cfg.output / "training"
 
+    # lerobot validates that --policy.repo_id is set (used for Hub
+    # uploading). We don't push to Hub, but the validator runs anyway.
+    # Pass a placeholder derived from the output dir name.
+    # Customers who want to auto-push can override via extra_lerobot_args.
+    repo_id = f"local/{cfg.output.name}"
+
     cmd = [
         "lerobot-train",
         f"--policy.type={policy_type}",
         f"--policy.pretrained_path={cfg.base}",
+        f"--policy.repo_id={repo_id}",
+        f"--policy.push_to_hub=false",
         f"--dataset.repo_id={cfg.dataset}",
         f"--output_dir={lerobot_output}",
         f"--steps={cfg.num_steps}",
