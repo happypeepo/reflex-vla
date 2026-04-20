@@ -115,12 +115,17 @@ def _build_lerobot_command(cfg: FinetuneConfig) -> list[str]:
     # subclass to decode into. Infer from the base-model id.
     policy_type = _infer_policy_type(cfg.base)
 
+    # lerobot-train wants to OWN its output_dir (errors if pre-existing
+    # and resume=False). We keep cfg.output as the reflex orchestration
+    # root, and give lerobot a subdirectory it creates fresh on each run.
+    lerobot_output = cfg.output / "training"
+
     cmd = [
         "lerobot-train",
         f"--policy.type={policy_type}",
         f"--policy.pretrained_path={cfg.base}",
         f"--dataset.repo_id={cfg.dataset}",
-        f"--output_dir={cfg.output}",
+        f"--output_dir={lerobot_output}",
         f"--steps={cfg.num_steps}",
         f"--batch_size={cfg.batch_size}",
         f"--optimizer.lr={cfg.learning_rate}",
@@ -170,14 +175,25 @@ def _run_lerobot_training(
 
 
 def _locate_checkpoint(output_dir: Path) -> Path | None:
-    """Find the final lerobot checkpoint under the output dir.
+    """Find the final lerobot checkpoint.
 
-    lerobot's train script writes checkpoints under
-    <output>/checkpoints/<step>/pretrained_model/. We pick the highest-
-    numbered step.
+    The reflex orchestration dir layout:
+        <output>/
+            training/               <- lerobot's output_dir
+                checkpoints/
+                    <step>/pretrained_model/  <- the actual ckpt
+            training_log.jsonl
+            export/                 <- reflex export output (later)
+
+    We pick the highest-numbered step. Older layouts (where reflex
+    itself was the lerobot output_dir) are also tolerated.
     """
-    ckpt_root = output_dir / "checkpoints"
-    if not ckpt_root.exists():
+    for base in (output_dir / "training" / "checkpoints",
+                 output_dir / "checkpoints"):
+        if base.exists():
+            ckpt_root = base
+            break
+    else:
         return None
     step_dirs = [p for p in ckpt_root.iterdir() if p.is_dir()]
     if not step_dirs:

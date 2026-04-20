@@ -137,19 +137,27 @@ class TestCheckpointLocation:
         assert _locate_checkpoint(tmp_path) is None
 
     def test_picks_highest_numeric_step(self, tmp_path):
-        # Simulate lerobot's checkpoint layout
+        # Simulate lerobot's checkpoint layout under training/.
         for step in (500, 1000, 1500, 2000):
-            d = tmp_path / "checkpoints" / str(step) / "pretrained_model"
+            d = tmp_path / "training" / "checkpoints" / str(step) / "pretrained_model"
             d.mkdir(parents=True)
             (d / "model.safetensors").write_bytes(b"\x00")
         ckpt = _locate_checkpoint(tmp_path)
         assert ckpt is not None
         assert ckpt.parent.name == "2000"
 
-    def test_falls_back_to_mtime_on_nonnumeric(self, tmp_path):
-        (tmp_path / "checkpoints" / "last").mkdir(parents=True)
+    def test_legacy_layout_still_works(self, tmp_path):
+        """Older layouts (no training/ subdir) are still tolerated."""
+        d = tmp_path / "checkpoints" / "1000" / "pretrained_model"
+        d.mkdir(parents=True)
+        (d / "model.safetensors").write_bytes(b"\x00")
         ckpt = _locate_checkpoint(tmp_path)
-        # Should still return something (the one dir present).
+        assert ckpt is not None
+        assert ckpt.parent.name == "1000"
+
+    def test_falls_back_to_mtime_on_nonnumeric(self, tmp_path):
+        (tmp_path / "training" / "checkpoints" / "last").mkdir(parents=True)
+        ckpt = _locate_checkpoint(tmp_path)
         assert ckpt is not None
 
 
@@ -158,7 +166,8 @@ class TestRunFinetuneOrchestration:
     No real training happens — we're testing wiring, not correctness."""
 
     def _setup_fake_checkpoint(self, output_dir: Path, step: int = 1000) -> Path:
-        d = output_dir / "checkpoints" / str(step) / "pretrained_model"
+        # Match the new layout: reflex root / training / checkpoints / <step> / ...
+        d = output_dir / "training" / "checkpoints" / str(step) / "pretrained_model"
         d.mkdir(parents=True)
         (d / "model.safetensors").write_bytes(b"\x00")
         return d
