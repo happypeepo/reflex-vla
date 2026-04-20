@@ -203,11 +203,18 @@ def _locate_checkpoint(output_dir: Path) -> Path | None:
             break
     else:
         return None
-    step_dirs = [p for p in ckpt_root.iterdir() if p.is_dir()]
+    # lerobot writes step-number dirs like '000200' plus a 'last'
+    # pointer (symlink or alias). Prefer numeric dirs — 'last' doesn't
+    # resolve reliably on Modal volumes and has no content of its own.
+    step_dirs = [
+        p for p in ckpt_root.iterdir()
+        if p.is_dir() and p.name.isdigit()
+    ]
+    if not step_dirs:
+        # Fall back: any dir, including 'last' if that's all we have.
+        step_dirs = [p for p in ckpt_root.iterdir() if p.is_dir()]
     if not step_dirs:
         return None
-    # Try numeric sort first (lerobot uses step-number dirs). Fall back
-    # to mtime if names aren't numeric.
     try:
         step_dirs.sort(key=lambda p: int(p.name))
     except ValueError:
@@ -218,11 +225,78 @@ def _locate_checkpoint(output_dir: Path) -> Path | None:
     return step_dirs[-1]
 
 
+def _merge_lora_adapter(checkpoint: Path, base_model_id: str) -> tuple[Path | None, str | None]:
+    """Merge a LoRA adapter checkpoint into the base model weights.
+
+    lerobot-train writes LoRA fine-tunes as adapter_model.safetensors +
+    adapter_config.json — only the LoRA deltas, no base weights. reflex
+    export needs a self-contained checkpoint (with model.safetensors),
+    so we load base + apply adapter + merge + save.
+
+    Returns (merged_checkpoint_path, error). On success error is None.
+    Writes merged weights to `<checkpoint>/merged/`.
+    """
+    adapter_cfg = checkpoint / "adapter_config.json"
+    adapter_weights = checkpoint / "adapter_model.safetensors"
+    if not (adapter_cfg.exists() and adapter_weights.exists()):
+        # Not a LoRA checkpoint — caller can use it directly.
+        return checkpoint, None
+
+    try:
+        from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+        from peft import PeftModel
+    except ImportError as exc:
+        return None, f"LoRA merge requires lerobot + peft: {exc}"
+
+    merged_dir = checkpoint / "merged"
+    if merged_dir.exists() and any(merged_dir.iterdir()):
+        logger.info("[finetune] merged LoRA already exists at %s", merged_dir)
+        return merged_dir, None
+
+    try:
+        logger.info("[finetune] Merging LoRA adapter into %s base", base_model_id)
+        policy = SmolVLAPolicy.from_pretrained(base_model_id)
+        # Apply adapter. PeftModel.from_pretrained handles the adapter
+        # config + weights.
+        merged_policy = PeftModel.from_pretrained(policy, str(checkpoint))
+        merged_policy = merged_policy.merge_and_unload()
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        merged_policy.save_pretrained(str(merged_dir))
+        # Also copy the pre/post processors + config that lerobot wrote
+        # so the merged dir is self-contained for downstream loading.
+        import shutil
+        for name in (
+            "config.json",
+            "policy_preprocessor.json",
+            "policy_postprocessor.json",
+            "train_config.json",
+        ):
+            src = checkpoint / name
+            if src.exists():
+                shutil.copy(src, merged_dir / name)
+        # Copy processor safetensors (lerobot suffixes them with step numbers).
+        for src in checkpoint.glob("policy_*_processor.safetensors"):
+            shutil.copy(src, merged_dir / src.name)
+        logger.info("[finetune] LoRA merged to %s", merged_dir)
+        return merged_dir, None
+    except Exception as exc:
+        return None, f"LoRA merge raised: {type(exc).__name__}: {exc}"
+
+
 def _auto_export(checkpoint: Path, cfg: FinetuneConfig) -> tuple[Path | None, str | None]:
     """Run reflex's existing monolithic export on the fine-tuned checkpoint.
 
-    Returns (onnx_path, error). On success, error is None.
+    Returns (onnx_path, error). On success, error is None. If the
+    checkpoint is a LoRA adapter (adapter_model.safetensors without
+    full base weights), merges it into the base model first.
     """
+    # LoRA checkpoints need the base merged in before export can find
+    # self-contained weights.
+    merged, merge_err = _merge_lora_adapter(checkpoint, cfg.base)
+    if merge_err:
+        return None, merge_err
+    export_src = merged or checkpoint
+
     try:
         from reflex.exporters.monolithic import export_monolithic
     except ImportError as exc:
@@ -230,7 +304,7 @@ def _auto_export(checkpoint: Path, cfg: FinetuneConfig) -> tuple[Path | None, st
 
     try:
         result = export_monolithic(
-            model_id=str(checkpoint),
+            model_id=str(export_src),
             output_dir=cfg.output / "export",
             target=cfg.target,
         )
