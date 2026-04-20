@@ -168,12 +168,16 @@ class SnapFlowBackend:
         try:
             import torch as _torch
             target_dtype = _torch.bfloat16 if dtype == "bf16" else _torch.float32
+            max_action_dim = getattr(teacher.config, "max_action_dim", None)
             for step, batch in enumerate(loader, start=1):
                 # Apply lerobot's preprocessor pipeline: rename_map (image keys),
                 # tokenizer (task -> language_tokens), device transfer, normalize.
                 batch = preprocessor(batch)
                 action, noise, t, obs_kwargs = _prepare_batch(
-                    batch, device=device, compute_dtype=target_dtype,
+                    batch,
+                    device=device,
+                    compute_dtype=target_dtype,
+                    max_action_dim=max_action_dim,
                 )
 
                 opt.zero_grad()
@@ -324,6 +328,7 @@ def _build_pi_family_adapters(
     reflex_context/01_architecture/distill_SYNTHESIS.md §"Deferred").
     """
     import torch
+    import torch.nn.functional as F
     from lerobot.policies.pi0.modeling_pi0 import make_att_2d_masks
     from lerobot.utils.constants import (
         OBS_LANGUAGE_ATTENTION_MASK,
@@ -343,6 +348,13 @@ def _build_pi_family_adapters(
         lang_tokens = obs_kwargs[OBS_LANGUAGE_TOKENS]
         lang_masks = obs_kwargs[OBS_LANGUAGE_ATTENTION_MASK]
         state = policy.prepare_state(obs_kwargs)
+        # Defensive re-pad: prepare_state SHOULD pad state to max_state_dim,
+        # but observed in smoke runs that some preprocessor configs leave
+        # the state untouched. Force-pad here so state_proj always sees
+        # the expected max_state_dim.
+        max_state_dim = getattr(policy.config, "max_state_dim", None)
+        if max_state_dim is not None and state.shape[-1] < max_state_dim:
+            state = F.pad(state, (0, max_state_dim - state.shape[-1]))
         # lerobot auto-casts state to fp32 if state_proj weights are fp32
         # (modeling_pi0.py:693) but doesn't handle the bf16-weights + fp32-state
         # direction. Cast state to match state_proj weight dtype here.
@@ -372,6 +384,12 @@ def _build_pi_family_adapters(
 
     def _run_denoise_step(policy, x, t, obs_kwargs):
         past_kv, prefix_pad_masks, state = _build_prefix_cache(policy, obs_kwargs)
+        # Action (x_t) should already be padded to max_action_dim in
+        # _prepare_batch so the whole flow-matching chain stays at the
+        # model's expected dim. Cast to action_in_proj dtype for safety.
+        action_dtype = policy.model.action_in_proj.weight.dtype
+        if x.dtype != action_dtype:
+            x = x.to(action_dtype)
         return policy.model.denoise_step(
             state=state,
             prefix_pad_masks=prefix_pad_masks,
@@ -523,7 +541,13 @@ def _build_dataloader(cfg, *, policy_type: str):
     return loader
 
 
-def _prepare_batch(batch: dict, *, device: str, compute_dtype=None) -> tuple:
+def _prepare_batch(
+    batch: dict,
+    *,
+    device: str,
+    compute_dtype=None,
+    max_action_dim: int | None = None,
+) -> tuple:
     """Unpack a preprocessed LeRobotDataset batch into (action, noise, t, obs_kwargs).
 
     The batch has already been through the lerobot preprocessor pipeline,
@@ -534,14 +558,21 @@ def _prepare_batch(batch: dict, *, device: str, compute_dtype=None) -> tuple:
     When `compute_dtype` is set (e.g. torch.bfloat16), action + noise
     are cast so the flow-matching chain runs in the model's dtype and
     avoids Linear-layer dtype mismatches downstream.
+
+    When `max_action_dim` is set, the action is right-padded with zeros
+    to that width so the flow-matching chain stays at the model's
+    expected action dim (pi0/pi05 expect 32 even if the dataset is 7-dim).
     """
     import torch
+    import torch.nn.functional as F
 
     action = batch["action"]
     if action.device.type != device.split(":")[0]:
         action = action.to(device)
     if compute_dtype is not None and action.dtype != compute_dtype:
         action = action.to(compute_dtype)
+    if max_action_dim is not None and action.shape[-1] < max_action_dim:
+        action = F.pad(action, (0, max_action_dim - action.shape[-1]))
     batch_size = action.shape[0]
     noise = torch.randn_like(action)
     t = torch.rand(batch_size, device=device)
