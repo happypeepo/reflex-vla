@@ -166,11 +166,15 @@ class SnapFlowBackend:
         loss_history: list[dict[str, float]] = []
         log_handle = open(ctx.training_log_path, "a", encoding="utf-8")
         try:
+            import torch as _torch
+            target_dtype = _torch.bfloat16 if dtype == "bf16" else _torch.float32
             for step, batch in enumerate(loader, start=1):
                 # Apply lerobot's preprocessor pipeline: rename_map (image keys),
                 # tokenizer (task -> language_tokens), device transfer, normalize.
                 batch = preprocessor(batch)
-                action, noise, t, obs_kwargs = _prepare_batch(batch, device=device)
+                action, noise, t, obs_kwargs = _prepare_batch(
+                    batch, device=device, compute_dtype=target_dtype,
+                )
 
                 opt.zero_grad()
                 loss, snap = snapflow_loss_step(
@@ -519,22 +523,30 @@ def _build_dataloader(cfg, *, policy_type: str):
     return loader
 
 
-def _prepare_batch(batch: dict, *, device: str) -> tuple:
+def _prepare_batch(batch: dict, *, device: str, compute_dtype=None) -> tuple:
     """Unpack a preprocessed LeRobotDataset batch into (action, noise, t, obs_kwargs).
 
     The batch has already been through the lerobot preprocessor pipeline,
     so tensors are on-device and language is tokenized. We split the
     action ground-truth out and leave everything else in obs_kwargs for
     the velocity fn.
+
+    When `compute_dtype` is set (e.g. torch.bfloat16), action + noise
+    are cast so the flow-matching chain runs in the model's dtype and
+    avoids Linear-layer dtype mismatches downstream.
     """
     import torch
 
     action = batch["action"]
     if action.device.type != device.split(":")[0]:
         action = action.to(device)
+    if compute_dtype is not None and action.dtype != compute_dtype:
+        action = action.to(compute_dtype)
     batch_size = action.shape[0]
     noise = torch.randn_like(action)
     t = torch.rand(batch_size, device=device)
+    if compute_dtype is not None:
+        t = t.to(compute_dtype)
 
     obs_kwargs = {k: v for k, v in batch.items() if k != "action"}
     return action, noise, t, obs_kwargs
