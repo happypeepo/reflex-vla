@@ -140,12 +140,22 @@ class SnapFlowBackend:
         # deepcopy-free past_kv, no hardcoded fp32 cast, target_time support.
         # Teacher's target_time_embed_mlp stays zero + frozen (we never pass
         # target_time to teacher, so the contribution is 0 either way).
+        #
+        # Also disable gradient_checkpointing on both. Pi05 enables it by
+        # default; with GC on, the gemma stack force-overrides use_cache=False
+        # and past_kv comes back EMPTY from the prefix forward, breaking
+        # downstream denoise_step (attention mask shape mismatch). We accept
+        # the memory cost of disabling GC; A100-80GB has headroom at batch=4.
         if policy_type in ("pi0", "pi05"):
             from reflex.distill.snapflow_pi0_model import enable_snapflow
             enable_snapflow(teacher.model)
             enable_snapflow(student.model)
             for p in teacher.model.target_time_embed_mlp.parameters():
                 p.requires_grad = False
+            for m in (teacher.model, student.model):
+                disable_gc = getattr(m, "gradient_checkpointing_disable", None)
+                if callable(disable_gc):
+                    disable_gc()
 
         # ---- 3. Install velocity adapters ---------------------------------
         teacher_velocity_fn, student_velocity_fn = _build_velocity_adapters(
