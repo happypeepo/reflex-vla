@@ -80,14 +80,46 @@ These are hermetic — no model load, no Modal. The real parity runs happen on M
 7. (Optional) Repeat 2-4 for pi0.5 (13 GB FP32 → est. ~6.6 GB FP16).
 8. (Pending — hardware dependent) Jetson-side real-device fit test + TRT engine FP16 build.
 
-## Learnings from the conversion pass (2026-04-19)
+## Learnings from the conversion pass (2026-04-19 / 2026-04-20)
 
 - **Don't use `ByteSize()` to gate logic on model size** — ByteSize() itself serializes the proto and hits the 2GB limit. Use on-disk size via `_size_with_external()`.
 - **External data rewrite requires explicit unlink of old siblings** — `onnx.save(save_as_external_data=True)` will leave stale `.bin` files alongside the new one if the destination was previously written. Need to `unlink()` first.
 - **`keep_io_types=True` breaks on oversized graphs** — Cast-node wiring gets Mul/Add operand dtypes wrong. For >1.8GB we flip to `keep_io_types=False` (end-to-end FP16; callers cast inputs/outputs).
 - **Op blocklist causes ORT load failures** — blocklisted ops (Pow/ReduceMean/Sqrt) stay FP32, but downstream MatMul/Mul receives FP16 weights → operand dtype mismatch. `convert_float_to_float16` doesn't insert Cast nodes at blocklist boundaries. Empty blocklist is the safer default.
 - **`infer_shapes_path` rehydrates weights to FP32** — calling it post-save undoes the FP16 conversion silently (size went from 1.13 GB back to 2.24 GB). Use value_info-strip instead.
-- **TRT is the Jetson deployment target anyway** — the ORT-FP16 load failure isn't a blocker for production; TRT engine build handles FP16 conversion independently. But ORT-FP16 direct-load would be a nice developer-ergonomic win.
+- **Don't `load_external_data=True` before graph surgery** — re-saving via `onnx.save(save_as_external_data=True)` serializes initializers through `float_data` (FP32), silently doubling the file size. Load with `load_external_data=False` for surgery that only touches nodes, then `onnx.save()` (no external-data flag) preserves the existing .bin pointer.
+- **TRT is the Jetson deployment target anyway** — the ORT-FP16 load failure isn't a blocker for production; TRT engine build handles FP16 conversion independently. But with the Cast-insertion pass below, ORT-FP16 direct-load works too.
+
+## The Cast-insertion post-pass (the actual fix)
+
+**Problem statement**: `onnxconverter_common.float16.convert_float_to_float16` produces ONNX models where some internal nodes have operand dtype mismatches (one FP32 arg, one FP16 arg). ORT rejects such models at load time:
+```
+Type Error: Type parameter (T) of Optype (Mul) bound to different types
+(tensor(float) and tensor(float16) in node (node_mul_7).
+```
+Observed in both smolvla_libero (484 mismatches) and pi0 (2 mismatches).
+
+**Solution** (`src/reflex/exporters/fp16_convert.py::fix_fp16_dtype_mismatches`):
+
+1. Load the ONNX with `load_external_data=False` (big .bin stays on disk; we only touch graph metadata).
+2. Build a tensor-name → dtype map via forward propagation:
+   - Seed from `graph.input` + `graph.initializer` (+ sparse inits).
+   - Walk nodes topologically. For each node, output dtype = input dtype (default), or special cases: `Cast` reads its `to` attribute; `Shape`/`Size` → int64; `ConstantOfShape` reads its `value.data_type`; `Constant` reads `value`/`value_float`/`value_int` as applicable.
+3. For each `MIXED_DTYPE_OPS` node (Mul/MatMul/Add/Sub/Div/Pow/Gemm/Concat/Where):
+   - Compute the set of floating dtypes across its inputs.
+   - If >1 floating dtype, find inputs != target_dtype (FP16), insert `Cast(to=FP16)` before them.
+   - For Where, skip index 0 (bool condition).
+4. Mutate `node.input` in place with the new cast-output names.
+5. Save with plain `onnx.save()` (no `save_as_external_data` flag) — preserves the external-data pointer to the on-disk .bin.
+
+**Result**: smolvla_libero FP16 now loads in ORT AND matches FP32 at cos=+0.999994 (max_abs=7.82e-03 on [-1, 1] action chunk; <1% relative error).
+
+**Key correctness properties**:
+- Dtype propagation is forward-only, no backtracking. Works because the ONNX graph is topologically sorted.
+- Inserted Cast nodes precede the mutated op in the new node list, preserving topological order.
+- Since we load without external data, we don't accidentally re-write the (correctly-quantized) FP16 weights through a float32 re-serialization path.
+
+**Reusable for**: any ONNX FP16 conversion flow where you hit operand-dtype-mismatch errors at load time. Works on graphs of any size (tested on 2.25 GB and 12.5 GB). Output count of Cast nodes tells you how "broken" the original conversion was at boundaries.
 
 ## Risk / failure modes
 

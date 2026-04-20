@@ -62,11 +62,29 @@
 
 All documented in `/Users/romirjain/.claude/projects/-Users-romirjain/memory/project_reflex_vla_onnx_export_gotchas.md` for future-session retrieval.
 
-## Open end-of-session
+## End-of-session status (extended into 2026-04-20 early hours)
 
 - **N=25 ONNX num_steps=10 LANDED: 8/25 = 32%** (vs native 40%, ONNX num_steps=1 28%). **num_steps=10 only gained +4pp, not the predicted +12pp.** Residual gap most likely fresh-noise stochasticity — each predict() call samples different noise, at N=5 per task the variance is huge (std ≈ ±1 episode). Real resolution would need N=500 per task (OpenPI standard). Documented the finding + caveats in `task_success_results.md`.
-- **FP16 conversion for pi0/pi0.5** — scaffold ready (`scripts/modal_fp16_convert.py`), not yet triggered. Next up.
-- **pi0.5 + GR00T native-path parity** (weight 9 goal) — still deferred to v0.3.
+- **FP16 conversion for pi0/smolvla_libero LANDED + PARITY VERIFIED**:
+  - pi0 FP32 export: 12.52 GB ✅
+  - pi0 FP16: **12.52 GB → 6.26 GB (-50.0%)** ✅ — **fits Orin Nano 8GB**
+  - smolvla_libero FP16: 2.25 GB → 1.13 GB (-50.1%) ✅
+  - smolvla FP16 parity: **cos = +0.999994, max_abs = 7.82e-03, PASS** at 1e-2 threshold ✅
+  - 5 iteration rounds to get the full pipeline working (`ByteSize()` hits 2GB, external-data rehydration bug, `keep_io_types=True` breaks big graphs, op blocklist causes dtype mismatches, onnxconverter misses Cast-insertion at boundaries)
+  - Final solution: `fix_fp16_dtype_mismatches()` post-pass + empty op blocklist + `load_external_data=False` for graph surgery. New module `src/reflex/exporters/fp16_convert.py`; 18 tests passing.
+- **Additional goal closed: `calibration-metrics` (weight 8)** — ECE + Brier + NLL pure-numpy implementations at `src/reflex/eval/calibration.py` with 18 unit tests. Zollo 2025 cites these as the non-sim metrics most monotonically linked to real-task success. Load-bearing for VLA deployment QA without robot/sim.
+- **Additional Modal scripts written**:
+  - `scripts/modal_fp16_convert.py` — FP32 → FP16 ONNX conversion
+  - `scripts/modal_fp16_parity.py` — FP16 vs FP32 shared-seed parity with auto-cast for FP16 session inputs
+
+## Remaining open at wrap
+
+- **pi0.5 + GR00T native-path parity** (weight 9 goal) — deferred to v0.3
+- **pi0.5 FP16 conversion** — same path as pi0; just not yet run
+- **Jetson-side real-device fit test** — blocked on hardware
+- **pi0 FP16 LIBERO task success** — no pi0 sim harness exists
+- **vlm-prefix-encoder** (weight 10) — open
+- **text-embedder-onnx** (weight 10) — open
 
 ## Related
 
