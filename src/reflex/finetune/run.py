@@ -360,58 +360,53 @@ def run_finetune(cfg: FinetuneConfig) -> FinetuneResult:
                 error=None,
             )
 
-    logger.info("[finetune] start: base=%s dataset=%s output=%s steps=%d",
-                cfg.base, cfg.dataset, cfg.output, cfg.num_steps)
+    logger.info("[finetune] start: phase=%s base=%s dataset=%s output=%s steps=%d",
+                cfg.phase, cfg.base, cfg.dataset, cfg.output, cfg.num_steps)
     t0 = time.time()
 
-    rc = _run_lerobot_training(cfg, training_log)
-    elapsed = time.time() - t0
-    logger.info("[finetune] training exit_code=%d elapsed=%.1fs", rc, elapsed)
+    # Route via resolve_backend() so both phase='train' (fine-tune) and
+    # phase='distill' (SnapFlow, Phase B) share one orchestration path.
+    # Backend.fit() writes training_log, fires hooks, returns the final
+    # checkpoint path; postprocess.finalize() takes over from there.
+    from reflex.finetune.backends import TrainerContext, resolve_backend
+    from reflex.finetune.hooks import HookRegistry
+    from reflex.finetune.postprocess import finalize
 
-    if rc != 0:
-        return FinetuneResult(
-            status="training_failed",
-            output_dir=cfg.output,
-            training_log_path=training_log,
-            error=f"lerobot-train exited with code {rc}; see {training_log}",
-        )
-
-    checkpoint = _locate_checkpoint(cfg.output)
-    if checkpoint is None:
-        return FinetuneResult(
-            status="training_failed",
-            output_dir=cfg.output,
-            training_log_path=training_log,
-            error=f"no checkpoint found under {cfg.output / 'checkpoints'}; "
-                  f"training reported success but produced no output",
-        )
-
-    result = FinetuneResult(
-        status="ok",
-        output_dir=cfg.output,
-        training_steps_completed=cfg.num_steps,
-        final_checkpoint_path=checkpoint,
+    ctx = TrainerContext(
+        config=cfg,
+        hooks=HookRegistry(),
         training_log_path=training_log,
+        teacher_path=Path(cfg.teacher_export) if cfg.teacher_export else None,
     )
+    backend = resolve_backend(cfg)
+    ckpt_result = backend.fit(ctx)
+    elapsed = time.time() - t0
+    logger.info(
+        "[finetune] training status=%s steps=%d elapsed=%.1fs",
+        ckpt_result.status, ckpt_result.training_steps_completed, elapsed,
+    )
+
+    if ckpt_result.status != "ok":
+        return FinetuneResult(
+            status=ckpt_result.status,
+            output_dir=cfg.output,
+            training_steps_completed=ckpt_result.training_steps_completed,
+            training_log_path=training_log,
+            error=ckpt_result.error,
+        )
 
     if cfg.skip_export:
         logger.info("[finetune] skip_export=True; done (no ONNX)")
-        return result
+        return FinetuneResult(
+            status="ok",
+            output_dir=cfg.output,
+            training_steps_completed=ckpt_result.training_steps_completed,
+            final_checkpoint_path=ckpt_result.final_checkpoint_path,
+            training_log_path=training_log,
+        )
 
-    logger.info("[finetune] auto-exporting checkpoint %s", checkpoint)
-    onnx_path, export_err = _auto_export(checkpoint, cfg)
-    if export_err:
-        result.status = "export_failed"
-        result.error = export_err
-        return result
-
-    result.onnx_path = onnx_path
-    # If the export wrote a VERIFICATION.md, surface its path.
-    v_md = cfg.output / "export" / "VERIFICATION.md"
-    if v_md.exists():
-        result.verification_md_path = v_md
-    logger.info("[finetune] DONE: onnx=%s", onnx_path)
-    return result
+    # Export + on_postprocess hook + VERIFICATION.md all live here.
+    return finalize(ctx, ckpt_result)
 
 
 __all__ = ["run_finetune"]
