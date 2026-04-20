@@ -336,6 +336,30 @@ def run_finetune(cfg: FinetuneConfig) -> FinetuneResult:
             error="config validation failed:\n  " + "\n  ".join(errs),
         )
 
+    # Pre-flight validation (v0.5) — catches top customer pains before
+    # any GPU time. Dry-run + skip flags supported.
+    if not cfg.skip_preflight:
+        from reflex.finetune.preflight import run_preflight
+        logger.info("[finetune] running preflight checks...")
+        report = run_preflight(cfg)
+        logger.info("[finetune] preflight:\n%s", report.render())
+        # Persist for customer inspection.
+        preflight_path = cfg.output / "preflight_report.txt"
+        preflight_path.write_text(report.render() + "\n")
+        if report.has_failures:
+            return FinetuneResult(
+                status="aborted",
+                output_dir=cfg.output,
+                error=report.error_message(),
+            )
+        if cfg.dry_run:
+            logger.info("[finetune] dry_run=True; skipping training")
+            return FinetuneResult(
+                status="ok",
+                output_dir=cfg.output,
+                error=None,
+            )
+
     logger.info("[finetune] start: base=%s dataset=%s output=%s steps=%d",
                 cfg.base, cfg.dataset, cfg.output, cfg.num_steps)
     t0 = time.time()

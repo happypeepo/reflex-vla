@@ -165,7 +165,12 @@ class TestCheckpointLocation:
 
 class TestRunFinetuneOrchestration:
     """Mocks subprocess + export to verify the orchestration flow.
-    No real training happens — we're testing wiring, not correctness."""
+    No real training happens — we're testing wiring, not correctness.
+
+    Preflight is auto-skipped in these tests via skip_preflight=True so
+    they don't try to hit HF. Preflight is tested separately in
+    tests/test_finetune_preflight.py.
+    """
 
     def _setup_fake_checkpoint(self, output_dir: Path, step: int = 1000) -> Path:
         # Match the new layout: reflex root / training / checkpoints / <step> / ...
@@ -174,11 +179,20 @@ class TestRunFinetuneOrchestration:
         (d / "model.safetensors").write_bytes(b"\x00")
         return d
 
+    def _cfg(self, tmp_path, **overrides):
+        """Build a minimal FinetuneConfig with preflight skipped."""
+        defaults = dict(
+            base="lerobot/smolvla_base",
+            dataset="lerobot/libero",
+            output=tmp_path,
+            skip_preflight=True,  # isolate orchestration from network
+        )
+        defaults.update(overrides)
+        return FinetuneConfig(**defaults)
+
     def test_config_failure_aborts(self, tmp_path):
         """Invalid config → aborted status, no subprocess launched."""
-        cfg = FinetuneConfig(
-            base="", dataset="lerobot/libero", output=tmp_path,  # missing base
-        )
+        cfg = self._cfg(tmp_path, base="")  # missing base
         with patch("reflex.finetune.run._run_lerobot_training") as mock_train:
             result = run_finetune(cfg)
         assert result.status == "aborted"
@@ -186,11 +200,7 @@ class TestRunFinetuneOrchestration:
         assert "base is required" in (result.error or "")
 
     def test_training_failure_surfaces_rc(self, tmp_path):
-        cfg = FinetuneConfig(
-            base="lerobot/smolvla_base",
-            dataset="lerobot/libero",
-            output=tmp_path,
-        )
+        cfg = self._cfg(tmp_path)
         with patch("reflex.finetune.run._run_lerobot_training", return_value=42):
             result = run_finetune(cfg)
         assert result.status == "training_failed"
@@ -199,12 +209,7 @@ class TestRunFinetuneOrchestration:
     def test_successful_training_plus_export(self, tmp_path):
         """Training succeeds (rc=0), checkpoint exists, export mock
         returns ONNX path → FinetuneResult has status=ok + onnx_path."""
-        cfg = FinetuneConfig(
-            base="lerobot/smolvla_base",
-            dataset="lerobot/libero",
-            output=tmp_path,
-            num_steps=1000,
-        )
+        cfg = self._cfg(tmp_path, num_steps=1000)
 
         def _fake_train(cfg, log_path, **kwargs):
             # Simulate a successful training run that wrote a checkpoint.
@@ -227,22 +232,14 @@ class TestRunFinetuneOrchestration:
     def test_successful_training_but_no_checkpoint_fails(self, tmp_path):
         """If lerobot-train exits 0 but produces no checkpoint, that's a
         bug we want to surface — not report success."""
-        cfg = FinetuneConfig(
-            base="lerobot/smolvla_base",
-            dataset="lerobot/libero",
-            output=tmp_path,
-        )
+        cfg = self._cfg(tmp_path)
         with patch("reflex.finetune.run._run_lerobot_training", return_value=0):
             result = run_finetune(cfg)
         assert result.status == "training_failed"
         assert "no checkpoint found" in (result.error or "")
 
     def test_export_failure_flagged(self, tmp_path):
-        cfg = FinetuneConfig(
-            base="lerobot/smolvla_base",
-            dataset="lerobot/libero",
-            output=tmp_path,
-        )
+        cfg = self._cfg(tmp_path)
 
         def _fake_train(cfg, log_path, **kwargs):
             self._setup_fake_checkpoint(cfg.output)
@@ -258,12 +255,7 @@ class TestRunFinetuneOrchestration:
         assert "OOM" in (result.error or "")
 
     def test_skip_export_flag(self, tmp_path):
-        cfg = FinetuneConfig(
-            base="lerobot/smolvla_base",
-            dataset="lerobot/libero",
-            output=tmp_path,
-            skip_export=True,
-        )
+        cfg = self._cfg(tmp_path, skip_export=True)
 
         def _fake_train(cfg, log_path, **kwargs):
             self._setup_fake_checkpoint(cfg.output)

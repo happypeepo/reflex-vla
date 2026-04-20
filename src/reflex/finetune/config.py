@@ -62,6 +62,15 @@ class FinetuneConfig:
     """Escape hatch: pass through extra args to lerobot-train. Used for
     features not yet first-class in FinetuneConfig."""
 
+    dry_run: bool = False
+    """If True, run preflight checks and exit. No GPU time spent.
+    Useful for validating config before committing to a multi-hour run."""
+
+    skip_preflight: bool = False
+    """If True, skip preflight validation. Escape hatch for local-dataset
+    or gated-repo flows where preflight can't resolve the schema.
+    Only set if you know what you're doing."""
+
     def __post_init__(self) -> None:
         self.output = Path(self.output)
 

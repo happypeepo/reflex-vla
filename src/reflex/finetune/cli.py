@@ -70,6 +70,21 @@ def finetune_command(
         help="Train only; don't auto-run reflex export. Useful for "
              "training sanity checks where you don't need ONNX yet.",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Run preflight validation and exit without training. Fast "
+             "way to verify dataset compatibility + dataset-size floors "
+             "before committing GPU hours. Writes preflight_report.txt "
+             "to the output directory.",
+    ),
+    skip_preflight: bool = typer.Option(
+        False,
+        "--skip-preflight",
+        help="Skip preflight validation. Escape hatch for local-dataset "
+             "or gated-repo flows where preflight can't resolve schema. "
+             "Only set if you know what you're doing.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
     """Fine-tune a VLA and auto-export to deployable ONNX.
@@ -106,6 +121,8 @@ def finetune_command(
         seed=seed,
         target=target,
         skip_export=skip_export,
+        dry_run=dry_run,
+        skip_preflight=skip_preflight,
     )
 
     console.print(f"[bold]reflex finetune[/bold] — v0.3 MVP (SmolVLA LoRA)")
