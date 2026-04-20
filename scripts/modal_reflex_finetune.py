@@ -58,7 +58,14 @@ ONNX_OUTPUT_PATH = "/onnx_out"
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git", "clang", "build-essential")
+    .apt_install(
+        "git", "clang", "build-essential",
+        # ffmpeg + codecs — torchcodec (lerobot's dataset video decoder)
+        # dlopens libavutil/libavcodec/libavformat at import time. Without
+        # these, dataset loading fails with OSError before training starts.
+        "ffmpeg", "libavutil-dev", "libavcodec-dev", "libavformat-dev",
+        "libswresample-dev", "libswscale-dev",
+    )
     .pip_install(
         "torch",
         "safetensors>=0.4.0",
