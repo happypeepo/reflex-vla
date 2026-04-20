@@ -1,0 +1,47 @@
+# arm64 variant of reflex-vla — targets Jetson Orin / Orin Nano / Thor.
+#
+# Philosophy: this image ships reflex-vla's Python runtime + ONNX deps
+# without bundling Jetson-specific CUDA/cuDNN/TensorRT (those live on the
+# Jetson device under /usr/local/cuda and are ABI-locked to the host
+# JetPack version). Customers `docker run --runtime=nvidia` on a Jetson
+# device and the host CUDA libs are exposed into the container via the
+# nvidia container runtime.
+#
+# Use:
+#   docker pull ghcr.io/rylinjames/reflex-vla:<version>-arm64
+#   docker run --runtime=nvidia --rm -v $(pwd)/exports:/exports \
+#     ghcr.io/rylinjames/reflex-vla:<version>-arm64
+#
+# Image size: ~1.2 GB (no CUDA baked in).
+# If you want a fully-bundled JetPack image, watch for :<version>-jetpack
+# tags (tracked in docker-jetpack-bundle goal, v0.3+).
+
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml README.md LICENSE ./
+COPY src/ ./src/
+
+# arm64 wheel availability:
+#   - torch: arm64 wheels exist from 2.2+
+#   - onnxruntime: arm64 wheels exist (CPU provider; CUDA provider requires
+#                  host libs via nvidia container runtime)
+#   - transformers, safetensors, onnx: pure-python or arm64-native wheels
+# We install the [serve] extra (ORT CPU + FastAPI + lerobot).
+# NOTE: [gpu] extra is NOT installed here — onnxruntime-gpu's CUDA
+# dependencies are pinned to specific CUDA major versions that won't
+# match Jetson's JetPack CUDA. Jetson users install onnxruntime-gpu
+# via JetPack-compatible wheels themselves (see NVIDIA's Jetson Zoo).
+RUN pip install --no-cache-dir ".[serve,monolithic]"
+
+EXPOSE 8000
+VOLUME ["/exports"]
+
+ENTRYPOINT ["reflex"]
+CMD ["serve", "/exports", "--host", "0.0.0.0", "--port", "8000"]
