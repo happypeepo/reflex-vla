@@ -339,6 +339,12 @@ def _build_pi_family_adapters(
         lang_tokens = obs_kwargs[OBS_LANGUAGE_TOKENS]
         lang_masks = obs_kwargs[OBS_LANGUAGE_ATTENTION_MASK]
         state = policy.prepare_state(obs_kwargs)
+        # lerobot auto-casts state to fp32 if state_proj weights are fp32
+        # (modeling_pi0.py:693) but doesn't handle the bf16-weights + fp32-state
+        # direction. Cast state to match state_proj weight dtype here.
+        state_dtype = m.state_proj.weight.dtype
+        if state.dtype != state_dtype:
+            state = state.to(state_dtype)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = m.embed_prefix(
             images, img_masks, lang_tokens, lang_masks,
