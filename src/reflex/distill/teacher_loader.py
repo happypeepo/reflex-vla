@@ -125,8 +125,7 @@ def load_teacher(
         raise ValueError(
             f"policy_type={policy_type!r} is not supported as a SnapFlow "
             f"teacher in v0.3. Allowlist: {sorted(allowlist)}. "
-            f"SmolVLA is v0.3.1 conditional; GR00T is v0.5+. See "
-            f"reflex_context/01_architecture/distill_SYNTHESIS.md."
+            f"SmolVLA is v0.3.1 conditional; GR00T is v0.5+."
         )
 
     logger.info("[teacher_loader] loading %s from %s", policy_type, path)

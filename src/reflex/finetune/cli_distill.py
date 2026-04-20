@@ -5,7 +5,7 @@ Replaces the v0.2 DMPO/pi-Flow entrypoint. v0.3 routes to
 same orchestration path as fine-tune — single source of truth for
 preflight, backend dispatch, export, and VERIFICATION.md.
 
-See reflex_context/01_architecture/distill_SYNTHESIS.md for scope.
+See https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/01_architecture/distill_SYNTHESIS.md for scope.
 """
 from __future__ import annotations
 

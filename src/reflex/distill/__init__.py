@@ -1,7 +1,8 @@
 """VLA distillation — SnapFlow 1-step self-distillation for flow-matching VLAs.
 
-v0.3: SnapFlow only (pi0 + pi0.5). See `reflex_context/01_architecture/
-distill_SYNTHESIS.md` for the scope decision.
+v0.3: SnapFlow only (pi0 + pi0.5). See
+https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/01_architecture/distill_SYNTHESIS.md
+for the scope decision.
 
 ## What's in v0.3
 
@@ -70,6 +71,5 @@ def get_method(name: str):
         raise ValueError(f"method={name!r}: {_DEPRECATED[name]}")
     raise ValueError(
         f"Unknown distillation method: {name!r}. Supported in v0.3: "
-        f"{sorted(_SUPPORTED_METHODS)}. "
-        f"See reflex_context/01_architecture/distill_SYNTHESIS.md."
+        f"{sorted(_SUPPORTED_METHODS)}."
     )

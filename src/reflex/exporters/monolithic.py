@@ -17,8 +17,9 @@ Requires (pinned in the ``monolithic`` extra):
     optree, scipy, num2words
 
 The verified artifacts produced by this module match what the Modal
-scripts produce. See reflex_context/measured_numbers.md for the parity
-rows this export is responsible for.
+scripts produce. See
+https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/measured_numbers.md
+for the parity rows this export is responsible for.
 """
 from __future__ import annotations
 

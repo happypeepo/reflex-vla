@@ -38,7 +38,7 @@ Each stage verified independently at cos >= 0.9999:
 - vision_encoder: Verified 2026-04-17 on pi0_base subset (cos=+0.99999994)
 - decoder_prefill: Verified 2026-04-17 on pi0_base subset (cos=+0.99999994)
 
-See reflex_context/03_research/pi0_empirical_derisk_findings.md.
+See https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/03_research/pi0_empirical_derisk_findings.md
 """
 from __future__ import annotations
 
@@ -650,8 +650,9 @@ def optimum_export_onnx(model_dir: Path, task: str, out_dir: Path) -> Path:
     """Run `optimum-cli export onnx` on a pre-built HF model dir.
 
     Uses legacy tracer (dynamo=False internally, which is Optimum's default)
-    per the 2026 Gemma ONNX gotchas (see reflex_context/03_research/
-    pi0_onnx_importable_sources.md Critical risk #2).
+    per the 2026 Gemma ONNX gotchas (see
+    https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/03_research/pi0_onnx_importable_sources.md
+    Critical risk #2).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     # Find the venv optimum-cli (prefer repo-local venv)

@@ -323,8 +323,7 @@ def _build_velocity_adapters(
     raise NotImplementedError(
         f"No velocity adapter for policy_type={policy_type!r}. "
         f"pi0/pi05 are supported in v0.3; SmolVLA in v0.3.1; "
-        f"GR00T in v0.5+. See "
-        f"reflex_context/01_architecture/distill_SYNTHESIS.md."
+        f"GR00T in v0.5+."
     )
 
 

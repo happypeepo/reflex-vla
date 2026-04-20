@@ -10,8 +10,8 @@ v0.3 scope: SmolVLA LoRA only via subprocess-lerobot-train + auto-export.
 Everything else (pi0, parity-gate, calibration-first eval, pluggable
 action heads, openpi-JAX backend) is v0.5+.
 
-Design doc: reflex_context/01_architecture/finetune_SYNTHESIS.md
-Architecture: reflex_context/01_architecture/finetune_architecture.md
+Design doc: https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/01_architecture/finetune_SYNTHESIS.md
+Architecture: https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/01_architecture/finetune_architecture.md
 """
 from __future__ import annotations
 

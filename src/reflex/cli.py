@@ -1162,8 +1162,8 @@ def adapt(
         "[yellow]`reflex adapt` is deprecated and will be removed in v0.3.[/yellow]\n"
         "[yellow]Velocity/torque limits are now part of `reflex guard`:[/yellow]\n"
         "  [cyan]reflex guard init --urdf <file> --output ./safety.json[/cyan]\n\n"
-        "[dim]Cross-embodiment action remapping had no users; archived in\n"
-        "reflex_context/06_archive/. Open an issue if you need it back.[/dim]"
+        "[dim]Cross-embodiment action remapping had no users; archived.\n"
+        "Open an issue if you need it back.[/dim]"
     )
     raise typer.Exit(0)
 

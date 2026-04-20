@@ -51,8 +51,7 @@ def resolve_backend(cfg) -> Backend:
         raise NotImplementedError(
             f"distillation_method={method!r} not supported in v0.3. "
             f"Only 'snapflow' is available. 'consistency' lands in v0.5+ "
-            f"when GR00T DDPM support ships. See "
-            f"reflex_context/01_architecture/distill_SYNTHESIS.md."
+            f"when GR00T DDPM support ships."
         )
     raise ValueError(
         f"Unknown phase={phase!r}. Valid: 'train' | 'distill'."

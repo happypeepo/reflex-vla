@@ -69,7 +69,7 @@ PI05_ACTION_KEYS = {
 
 def build_pi0_expert_stack(
     state_dict: dict[str, torch.Tensor],
-    head_dim: int = 256,  # Fixed 2026-04-17 — was 128 (silent bug: gave nq=16/nkv=2 instead of correct nq=8/nkv=1 per Gemma spec; see reflex_context/02_bugs_fixed/)
+    head_dim: int = 256,  # Fixed 2026-04-17 — was 128 (silent bug: gave nq=16/nkv=2 instead of correct nq=8/nkv=1 per Gemma spec; see https://github.com/rylinjames/reflex-vault/tree/main/reflex_vla/02_bugs_fixed)
 ) -> tuple[ExpertStack, dict]:
     """Build the full pi0 expert stack from state_dict.
 
@@ -145,7 +145,7 @@ def build_pi0_expert_stack(
         # trained centered at 0. ExpertGQALayer uses Llama-style DecomposedRMSNorm:
         # y = x_normed * weight. To apply pi0's Gemma weights inside a Llama RMSNorm,
         # pre-transform: w_llama = 1 + w_gemma. Verified pattern from
-        # reflex_context/01_architecture/pi0_rmsnorm_already_decomposed.md
+        # https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/01_architecture/pi0_rmsnorm_already_decomposed.md
         norm_in = state_dict[f"{prefix}.input_layernorm.weight"] + 1.0
         norm_post = state_dict[f"{prefix}.post_attention_layernorm.weight"] + 1.0
         layer_sd = {
