@@ -400,20 +400,33 @@ def _build_pi_family_adapters(
         return past_kv, prefix_pad_masks, state
 
     def _run_denoise_step(policy, x, t, obs_kwargs):
-        past_kv, prefix_pad_masks, state = _build_prefix_cache(policy, obs_kwargs)
-        # Action (x_t) should already be padded to max_action_dim in
-        # _prepare_batch so the whole flow-matching chain stays at the
-        # model's expected dim. Cast to action_in_proj dtype for safety.
-        action_dtype = policy.model.action_in_proj.weight.dtype
-        if x.dtype != action_dtype:
-            x = x.to(action_dtype)
-        return policy.model.denoise_step(
-            state=state,
-            prefix_pad_masks=prefix_pad_masks,
-            past_key_values=past_kv,
-            x_t=x,
-            timestep=t,
-        )
+        # Monkey-patch lerobot's inner `copy.deepcopy(past_key_values)`
+        # for the duration of this call. In inference that deepcopy is a
+        # mutation safety-net, but under training it fails because
+        # past_kv contains graph-attached tensors (pytorch#103001).
+        # denoise_step calls paligemma_with_expert.forward with
+        # use_cache=False (modeling_pi0.py:924), so the forward doesn't
+        # mutate past_kv → deepcopy is defensive only, safe to skip.
+        import lerobot.policies.pi0.modeling_pi0 as _pi0_mod
+        _orig_deepcopy = _pi0_mod.copy.deepcopy
+        _pi0_mod.copy.deepcopy = lambda x: x
+        try:
+            past_kv, prefix_pad_masks, state = _build_prefix_cache(policy, obs_kwargs)
+            # Action (x_t) should already be padded to max_action_dim in
+            # _prepare_batch so the whole flow-matching chain stays at the
+            # model's expected dim. Cast to action_in_proj dtype for safety.
+            action_dtype = policy.model.action_in_proj.weight.dtype
+            if x.dtype != action_dtype:
+                x = x.to(action_dtype)
+            return policy.model.denoise_step(
+                state=state,
+                prefix_pad_masks=prefix_pad_masks,
+                past_key_values=past_kv,
+                x_t=x,
+                timestep=t,
+            )
+        finally:
+            _pi0_mod.copy.deepcopy = _orig_deepcopy
 
     def teacher_velocity_fn(x, t, **obs_kwargs):
         with torch.no_grad():
