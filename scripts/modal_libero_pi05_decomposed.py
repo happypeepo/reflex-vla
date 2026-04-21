@@ -186,6 +186,7 @@ def run_decomposed_libero(
     replan_steps: int = 5,
     num_steps_wait: int = 10,
     cache_ttl_sec: float = 0.2,
+    cache_max_age_steps: int = 0,
     phash_hamming: int = 6,
     preprocessor_ref: str = "lerobot/pi05_libero_finetuned_v044",
     seed: int = 7,
@@ -265,6 +266,7 @@ def run_decomposed_libero(
         providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
         enable_cache=(cache_mode == "phash"),
         cache_ttl_sec=cache_ttl_sec,
+        cache_max_age_steps=cache_max_age_steps,
         phash_hamming_threshold=phash_hamming,
     )
     print(f"[decomposed] Pi05DecomposedInference ready. cache_mode={cache_mode}, "
@@ -485,6 +487,7 @@ def main(
     tasks: str = "0",
     suite: str = "libero_10",
     cache_ttl_sec: float = 0.2,
+    cache_max_age_steps: int = 0,
     phash_hamming: int = 6,
     preprocessor_ref: str = "lerobot/pi05_libero_finetuned_v044",
     seed: int = 7,
@@ -523,6 +526,7 @@ def main(
         task_suite_name=suite,
         task_indices=task_list,
         cache_ttl_sec=cache_ttl_sec,
+        cache_max_age_steps=cache_max_age_steps,
         phash_hamming=phash_hamming,
         preprocessor_ref=preprocessor_ref,
         seed=seed,

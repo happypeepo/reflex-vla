@@ -43,7 +43,8 @@ class CacheEntry:
     prefix_pad_masks: np.ndarray
     image_phashes: tuple[bytes, ...]     # per-camera perceptual hash
     lang_hash: bytes                     # exact md5 of language tokens
-    timestamp: float
+    timestamp: float                     # wall-clock time (for TTL-sec path)
+    step_index: int                      # predict_action_chunk call number (for step-count path)
 
 
 @dataclass
@@ -90,8 +91,15 @@ class Pi05DecomposedInference:
         When False, every call runs the VLM. When True, the cache matches
         on perceptual-image-hash + exact-language-hash + TTL.
     cache_ttl_sec
-        Seconds after which a cache entry is considered stale regardless
-        of match. Default 0.2s — caps error bound at ~5 frames of latency.
+        Seconds of wall-clock after which a cache entry is considered
+        stale. Default 0.2s — good for 20-50 Hz online deployment where
+        0.2s = 4-10 real frames. For offline eval (LIBERO, <1 Hz) use
+        ``cache_max_age_steps`` instead since wall-clock is meaningless.
+    cache_max_age_steps
+        Alternative staleness check: expire cache entry after this many
+        ``predict_action_chunk`` calls regardless of wall-clock. 0 =
+        disabled (fall back to cache_ttl_sec). Recommended: 3-5 for
+        offline eval.
     phash_hamming_threshold
         Per-image perceptual-hash distance allowed for a cache hit.
         Default 6 — tuned for typical manipulation sensor noise (tune
@@ -106,6 +114,7 @@ class Pi05DecomposedInference:
         providers: list[str] | None = None,
         enable_cache: bool = True,
         cache_ttl_sec: float = 0.2,
+        cache_max_age_steps: int = 0,
         phash_hamming_threshold: int = 6,
     ):
         import onnxruntime as ort
@@ -113,7 +122,9 @@ class Pi05DecomposedInference:
         self.export_dir = Path(export_dir)
         self.enable_cache = enable_cache
         self.cache_ttl_sec = cache_ttl_sec
+        self.cache_max_age_steps = cache_max_age_steps
         self.phash_hamming_threshold = phash_hamming_threshold
+        self._call_index: int = 0  # monotonic call counter for step-count TTL
         # Default prefers CUDA when available, falls back to CPU if the
         # runtime doesn't have GPU providers. LIBERO eval on an A100 box
         # runs ~50× faster on GPU; only use CPU explicitly when matching
@@ -215,6 +226,7 @@ class Pi05DecomposedInference:
         """Drop any cached VLM output. Call between episodes so cross-task
         phash collisions can't bridge unrelated observations."""
         self._cache = None
+        self._call_index = 0
 
     def get_stats(self) -> dict[str, Any]:
         return self._stats.as_dict()
@@ -231,10 +243,19 @@ class Pi05DecomposedInference:
         lang_hash: bytes,
     ) -> tuple[list[np.ndarray], np.ndarray]:
         now = time.time()
+        self._call_index += 1
 
         if self.enable_cache and self._cache is not None:
             entry = self._cache
-            if now - entry.timestamp > self.cache_ttl_sec:
+            # Staleness check: prefer step-count when the caller has
+            # configured `cache_max_age_steps > 0` (offline eval); fall
+            # back to wall-clock TTL otherwise (online deployment where
+            # frames arrive at 20-50 Hz and wall-clock is meaningful).
+            if self.cache_max_age_steps > 0:
+                stale = (self._call_index - entry.step_index) > self.cache_max_age_steps
+            else:
+                stale = (now - entry.timestamp) > self.cache_ttl_sec
+            if stale:
                 self._stats.evictions_ttl += 1
                 self._cache = None
             elif entry.lang_hash != lang_hash:
@@ -271,6 +292,7 @@ class Pi05DecomposedInference:
                 image_phashes=image_phashes,
                 lang_hash=lang_hash,
                 timestamp=now,
+                step_index=self._call_index,
             )
         return past_kv, prefix_pad
 
