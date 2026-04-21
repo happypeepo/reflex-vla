@@ -108,6 +108,8 @@ image = (
         "nvidia-cufft-cu12>=11.0,<13.0",
         "nvidia-cusparse-cu12>=12.0,<13.0",
         "nvidia-cusolver-cu12>=11.0,<13.0",
+        "nvidia-cuda-runtime-cu12>=12.0,<13.0",
+        "nvidia-cuda-nvrtc-cu12>=12.0,<13.0",
         "onnxscript>=0.1",
         "mujoco==3.3.2",
         "robosuite==1.4.1",
@@ -147,9 +149,11 @@ image = (
         "PYTHONPATH": "/opt/LIBERO",
         # Point onnxruntime-gpu at the CUDA libs bundled as pip packages
         # so the CUDAExecutionProvider actually loads on A100. Previous
-        # pass was missing curand/cufft/cusparse/cusolver — onnxruntime
-        # silently fell back to CPU.
+        # attempts missed libcudart (cuda-runtime) + libcudnn path —
+        # onnxruntime silently fell back to CPU each time.
         "LD_LIBRARY_PATH": (
+            "/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:"
+            "/usr/local/lib/python3.12/site-packages/nvidia/cuda_nvrtc/lib:"
             "/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:"
             "/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:"
             "/usr/local/lib/python3.12/site-packages/nvidia/curand/lib:"
