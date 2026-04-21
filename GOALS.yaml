@@ -375,8 +375,8 @@ goals:
     weight: 8
 
   - id: decomposed-pi05-export-and-prefix-cache
-    status: done
-    description: "COMPLETED 2026-04-21. Split pi0.5 monolithic ONNX into `vlm_prefix.onnx` + `expert_denoise.onnx`, perceptual-hash + TTL prefix cache in `Pi05DecomposedInference`. **Measured 9.1× per-query speedup** on A100 (105ms→11.6ms) — exceeds design doc's 3-4× avg / 10× peak target. Parity: cos=1.0 byte-identical vs monolithic. LIBERO cache-off: 28/30 = 93.3% (matches monolithic 29/30 baseline). Cache-on LIBERO retention has known follow-up polish (wall-clock TTL → step-count, hamming threshold tune) but the core speedup + correctness claims are closed. Evidence: `reflex_vault/03_experiments/2026-04-21-pi05-decomposed-{parity,libero-partial,latency-bench}.md`, `01_decisions/2026-04-21-decomposed-pi05-static-shape-ship.md`. Shipped files: `src/reflex/exporters/decomposed.py`, `src/reflex/runtime/pi05_decomposed_server.py`, `scripts/modal_{export,verify,libero,latency}_pi05_decomposed.py`."
+    status: partial
+    description: "PARTIAL 2026-04-21/22. Decomposed export + cache code shipped. **Parity cos=1.0 ✅**, **LIBERO cache-off 28/30 = monolithic baseline ✅**, **latency probe 9.1× on matched inputs ✅**. BUT cache-on LIBERO = 25/30 < 28/30 — cache doesn't hit in production because **pi0.5 tokenizes proprio state INTO the language prompt**, so `lang_tokens` drifts every frame regardless of task description. The 9.1× latency probe fed bit-identical inputs so the cache hit; in actual deployment pi0.5 lang drifts → 0% hit rate. Structural issue documented in `reflex_vault/02_research/2026-04-22-pi05-state-in-language-invalidates-prefix-cache.md`. Remediations: (a) action-chunk cache keyed on raw obs (works regardless, another 10× on top); (b) split static prompt vs dynamic state in preprocessor; (c) pivot: prefix cache is a pi0-only feature. Shipped files: `src/reflex/exporters/decomposed.py`, `src/reflex/runtime/pi05_decomposed_server.py`, `scripts/modal_{export,verify,libero,latency}_pi05_decomposed.py`."
     check: "test -f src/reflex/runtime/pi05_decomposed_server.py && test -f scripts/modal_latency_pi05_decomposed.py"
     weight: 8
 
