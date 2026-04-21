@@ -651,7 +651,19 @@ def _resolve_snapflow_pi05_state_out_class() -> type:
 
     class SnapFlowPI05StateOutPytorch(parent):
         """v0.5 StateOut student. Inherits target_time machinery from
-        SnapFlowPI05Pytorch; adds explicit state input via state_proj."""
+        SnapFlowPI05Pytorch; adds explicit state input via state_proj.
+
+        Design note (2026-04-22): first attempt was to prepend
+        ``state_proj(state)`` as a dedicated suffix token (pi0 pattern).
+        That breaks pi0.5's attention mask plumbing — the expert
+        attention expects a fixed suffix_len=chunk_size and raises
+        'attn_weights vs attention_mask dim mismatch' at the expert's
+        eager attention call. Revised approach below: ADD state_emb
+        to the existing action embeddings (broadcast over chunk dim)
+        so suffix shape stays (B, chunk_size, dim) — no mask impact.
+        The state signal still reaches the expert via action_time_emb
+        conditioning.
+        """
 
         def embed_suffix(  # type: ignore[override]
             self,
@@ -660,37 +672,28 @@ def _resolve_snapflow_pi05_state_out_class() -> type:
             target_time=None,
             state=None,
         ):
-            """Prepend ``state_proj(state)`` to the suffix, then fall
-            through parent's SnapFlow embed_suffix body. State MUST be
-            provided — the parent's signature had state=None as a no-op
-            path; here we require state so the student actually uses it.
-            """
+            """Same suffix shape as parent but action embeddings carry
+            an additive state contribution via state_proj. State MUST
+            be provided."""
             if state is None:
                 raise ValueError(
-                    "SnapFlowPI05StateOutPytorch.embed_suffix requires "
-                    "state=<tensor>; student architecture depends on it"
+                    "SnapFlowPI05StateOutPytorch.embed_suffix requires state"
                 )
             if self.state_proj.weight.dtype == torch.float32 and state.dtype != torch.float32:
                 state = state.to(torch.float32)
 
-            state_emb = self.state_proj(state)
-            # Parent embed_suffix builds a sequence starting with action_emb.
-            # We run parent to get (embs_without_state, pad_masks, att_masks,
-            # adarms_cond) then prepend state token at position 0.
-            embs_no_state, pad_masks_no_state, att_masks_no_state, adarms_cond = (
+            # Run parent's embed_suffix unchanged — gets us the correct
+            # suffix shape + attention masks + adarms_cond.
+            embs, pad_masks, att_masks, adarms_cond = (
                 super().embed_suffix(noisy_actions, timestep, target_time=target_time)
             )
-            bsize = state_emb.shape[0]
-            device = state_emb.device
-            state_token = state_emb[:, None, :]
-            state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
-            state_att_flag = torch.ones(
-                bsize, 1, dtype=att_masks_no_state.dtype, device=device,
-            )
 
-            embs = torch.cat([state_token, embs_no_state], dim=1)
-            pad_masks = torch.cat([state_mask, pad_masks_no_state], dim=1)
-            att_masks = torch.cat([state_att_flag, att_masks_no_state], dim=1)
+            # Inject state as an additive bias to the action embeddings.
+            # state_emb shape: (B, dim). Broadcast-add over the chunk
+            # dimension without changing suffix_len.
+            state_emb = self.state_proj(state)  # (B, dim)
+            state_emb = state_emb.to(embs.dtype)
+            embs = embs + state_emb[:, None, :]
 
             return embs, pad_masks, att_masks, adarms_cond
 
