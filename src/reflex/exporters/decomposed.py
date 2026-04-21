@@ -161,8 +161,11 @@ def export_pi05_decomposed(
         mask_base=torch.ones(B, dtype=torch.bool),
         mask_wrist_l=torch.ones(B, dtype=torch.bool),
         mask_wrist_r=torch.ones(B, dtype=torch.bool),
-        lang_tokens=torch.randint(0, 257152, (B, 16), dtype=torch.long),
-        lang_masks=torch.ones(B, 16, dtype=torch.bool),
+        # Preprocessor pads pi0.5 lang prompts to 200 tokens at runtime;
+        # match so the exported ONNX doesn't ARG-fail when LIBERO feeds
+        # 200-token prompts. 3*256 vision + 200 lang = 968 prefix_seq_len.
+        lang_tokens=torch.randint(0, 257152, (B, 200), dtype=torch.long),
+        lang_masks=torch.ones(B, 200, dtype=torch.bool),
     )
 
     # 36 past_k_i / past_v_i outputs + 1 prefix_pad_masks.
