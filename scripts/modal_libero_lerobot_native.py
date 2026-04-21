@@ -432,6 +432,14 @@ def run_ported_libero(
                                         chunk = policy.model.sample_actions_1step(
                                             images, img_masks, lang_tokens, lang_masks,
                                         )
+                                    # predict_action_chunk trims max_action_dim
+                                    # (32) down to the real env action dim (7
+                                    # for LIBERO) before returning. Our 1-NFE
+                                    # path bypasses that wrapper, so replicate
+                                    # the trim here.
+                                    from lerobot.utils.constants import ACTION
+                                    orig_dim = policy.config.output_features[ACTION].shape[0]
+                                    chunk = chunk[:, :, :orig_dim]
                                 else:
                                     chunk = policy.predict_action_chunk(batch_pp)
                             # Apply postprocessor (unnormalizes back to env
