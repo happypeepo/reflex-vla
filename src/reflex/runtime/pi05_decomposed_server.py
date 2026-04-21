@@ -48,6 +48,20 @@ class CacheEntry:
 
 
 @dataclass
+class ActionCacheEntry:
+    """One action chunk cached on (image_phashes, lang_hash). Keyed on
+    the VLM-input side only, noise is re-sampled stochastically on
+    every call so the same observation can produce different actions
+    across calls — but for a SnapFlow 1-NFE student at target_time=1
+    the noise dependence is minimal, so reusing a cached chunk on a
+    matching obs is effectively zero-cost."""
+    image_phashes: tuple[bytes, ...]
+    lang_hash: bytes
+    step_index: int
+    actions: np.ndarray
+
+
+@dataclass
 class CacheStats:
     """Cumulative cache metrics — exposed via get_stats() so callers
     can log hit rate alongside LIBERO task success."""
@@ -56,6 +70,9 @@ class CacheStats:
     evictions_ttl: int = 0
     evictions_lang: int = 0
     evictions_phash: int = 0
+    # action-chunk cache (separate layer, stats tracked independently)
+    action_hits: int = 0
+    action_misses: int = 0
 
     @property
     def total(self) -> int:
@@ -64,6 +81,14 @@ class CacheStats:
     @property
     def hit_rate(self) -> float:
         return self.hits / self.total if self.total > 0 else 0.0
+
+    @property
+    def action_total(self) -> int:
+        return self.action_hits + self.action_misses
+
+    @property
+    def action_hit_rate(self) -> float:
+        return self.action_hits / self.action_total if self.action_total > 0 else 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +99,10 @@ class CacheStats:
             "evictions_ttl": self.evictions_ttl,
             "evictions_lang": self.evictions_lang,
             "evictions_phash": self.evictions_phash,
+            "action_hits": self.action_hits,
+            "action_misses": self.action_misses,
+            "action_total": self.action_total,
+            "action_hit_rate": self.action_hit_rate,
         }
 
 
@@ -116,7 +145,24 @@ class Pi05DecomposedInference:
         cache_ttl_sec: float = 0.2,
         cache_max_age_steps: int = 0,
         phash_hamming_threshold: int = 6,
+        cache_level: str = "prefix",
+        action_cache_max_age_steps: int = 2,
     ):
+        """``cache_level`` controls which layer is cached:
+
+        - ``"none"``: every call runs VLM + expert.
+        - ``"prefix"`` (default): VLM prefix cached on (phash, lang);
+          expert always runs. Works best for VLAs with stable lang
+          across frames (pi0 with explicit state input, SmolVLA).
+        - ``"action"``: final action chunk cached on (phash, lang).
+          Skips BOTH VLM and expert on hit. Works regardless of
+          state-in-language — the hash captures all VLA input state
+          that affects the output. Designed for state-in-language
+          VLAs like pi0.5 where prefix caching doesn't hit in
+          production. ``action_cache_max_age_steps`` bounds how many
+          calls a stale cached chunk can be reused across.
+
+        """
         import onnxruntime as ort
 
         self.export_dir = Path(export_dir)
@@ -124,7 +170,12 @@ class Pi05DecomposedInference:
         self.cache_ttl_sec = cache_ttl_sec
         self.cache_max_age_steps = cache_max_age_steps
         self.phash_hamming_threshold = phash_hamming_threshold
+        if cache_level not in ("none", "prefix", "action"):
+            raise ValueError(f"cache_level must be 'none'|'prefix'|'action', got {cache_level!r}")
+        self.cache_level = cache_level
+        self.action_cache_max_age_steps = action_cache_max_age_steps
         self._call_index: int = 0  # monotonic call counter for step-count TTL
+        self._action_cache: ActionCacheEntry | None = None
         # Default prefers CUDA when available, falls back to CPU if the
         # runtime doesn't have GPU providers. LIBERO eval on an A100 box
         # runs ~50× faster on GPU; only use CPU explicitly when matching
@@ -192,13 +243,28 @@ class Pi05DecomposedInference:
         ``(B, chunk_size, action_dim)``.
 
         Uses the prefix cache when enabled + hashes match + TTL valid.
+        When ``cache_level='action'``, skips both VLM + expert when the
+        (image_phashes, lang_hash) key matches a recent cached chunk.
         Returns float32 regardless of the ONNX internal dtype."""
+        self._call_index += 1
         image_phashes = (
             self._phash(img_base),
             self._phash(img_wrist_l),
             self._phash(img_wrist_r),
         )
         lang_hash = self._lang_hash(lang_tokens)
+
+        # ---- Action-chunk cache (skip full forward on hit) --------------
+        if self.cache_level == "action" and self._action_cache is not None:
+            entry = self._action_cache
+            steps_since = self._call_index - entry.step_index
+            if (steps_since <= self.action_cache_max_age_steps
+                and entry.lang_hash == lang_hash
+                and self._phashes_match(entry.image_phashes, image_phashes)):
+                self._stats.action_hits += 1
+                return entry.actions
+        if self.cache_level == "action":
+            self._stats.action_misses += 1
 
         past_kv, prefix_pad = self._get_or_run_prefix(
             img_base=img_base,
@@ -220,12 +286,23 @@ class Pi05DecomposedInference:
         actions = self._sess_expert.run(["actions"], expert_feed)[0]
         if actions.dtype != np.float32:
             actions = actions.astype(np.float32)
+
+        # ---- Populate action cache -------------------------------------
+        if self.cache_level == "action":
+            self._action_cache = ActionCacheEntry(
+                image_phashes=image_phashes,
+                lang_hash=lang_hash,
+                step_index=self._call_index,
+                actions=actions,
+            )
+
         return actions
 
     def reset_cache(self) -> None:
         """Drop any cached VLM output. Call between episodes so cross-task
         phash collisions can't bridge unrelated observations."""
         self._cache = None
+        self._action_cache = None
         self._call_index = 0
 
     def get_stats(self) -> dict[str, Any]:
@@ -243,7 +320,8 @@ class Pi05DecomposedInference:
         lang_hash: bytes,
     ) -> tuple[list[np.ndarray], np.ndarray]:
         now = time.time()
-        self._call_index += 1
+        # `self._call_index` is bumped by predict_action_chunk once per
+        # public call — don't bump again here or step-count TTL breaks.
 
         if self.enable_cache and self._cache is not None:
             entry = self._cache
