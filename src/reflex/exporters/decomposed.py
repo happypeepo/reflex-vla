@@ -195,14 +195,27 @@ def export_pi05_decomposed(
     logger.info("[decomposed] prefix Cast fixes: %d", prefix_fixes)
 
     # ---- Export 2: expert_denoise.onnx --------------------------------
-    expert_wrapper = Pi05ExpertWrapper(policy.model, num_steps).eval()
+    # Free the prefix wrapper before building the expert — on A100-80GB
+    # we OOM'd with both loaded + a second prefix forward for dummy
+    # inputs. Generate expert dummies from known static shapes instead.
+    import gc
+    del prefix_wrapper, ep_prefix
+    gc.collect()
 
-    # Run the prefix wrapper ONCE to get real past_kv shapes for the
-    # expert wrapper's dummy inputs. Avoids guessing.
-    with torch.no_grad():
-        prefix_outputs = prefix_wrapper(*prefix_dummy.values())
-    past_kv_dummies = prefix_outputs[:-1]  # 36 tensors
-    prefix_pad_masks_dummy = prefix_outputs[-1]
+    # pi05 prefix_seq_len = 3 vision views × 256 patches + 16 language
+    # tokens + small slack = 1024 (confirmed via earlier smoke runs at
+    # prefix_len=1018 for pi05_libero_finetuned_v044 dummy inputs). Use
+    # 1024 as a safe round number; the ONNX graph is shape-specialized
+    # at this fixed length regardless.
+    prefix_seq_len = 1024
+    past_kv_shape = (B, PI05_KV_HEADS, prefix_seq_len, PI05_HEAD_DIM)
+    past_kv_dummies = [
+        torch.randn(past_kv_shape, dtype=torch.float32)
+        for _ in range(PI05_PALIGEMMA_LAYERS * 2)
+    ]
+    prefix_pad_masks_dummy = torch.ones(B, prefix_seq_len, dtype=torch.bool)
+
+    expert_wrapper = Pi05ExpertWrapper(policy.model, num_steps).eval()
 
     expert_dummy = {}
     for idx, t in enumerate(past_kv_dummies):
