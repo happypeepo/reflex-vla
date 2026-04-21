@@ -374,6 +374,12 @@ goals:
     check: "grep -q 'compile_model.*False\\|torch.compile = lambda' src/reflex/exporters/monolithic.py 2>/dev/null"
     weight: 8
 
+  - id: distill-state-out-pi05-v0.5
+    status: in_progress
+    description: "v0.5 milestone: train a SnapFlow pi0.5 student that takes proprio state as an EXPLICIT input via a new state_proj layer, instead of pi0.5's default state-in-language tokenization. Goal: unlock the prefix KV cache in pi0.5 production (currently 0% hit rate because lang drifts every frame due to state-in-lang). Design: reflex_vault 01_architecture/distill_state_out_pi05_design.md. ADR: 01_decisions/2026-04-22-distill-state-out-pi05-student.md. Status 2026-04-22: student class scaffolding shipped (SnapFlowPI05StateOutPytorch + enable_snapflow_state_out). Remaining: (a) preprocessor override to strip state from lang_tokens at training+inference, (b) distill script wiring, (c) 10k-step distill run on Modal (~$15), (d) LIBERO eval + cache-on eval + latency microbench. Success gate: ≥95% LIBERO cache-off, ≥95% cache-on, ≥50% prefix cache hit rate in continuous manipulation, ≥7× per-query speedup."
+    check: "grep -q 'SnapFlowPI05StateOutPytorch' src/reflex/distill/snapflow_pi0_model.py 2>/dev/null"
+    weight: 9
+
   - id: decomposed-pi05-export-and-prefix-cache
     status: partial
     description: "PARTIAL 2026-04-21/22. Decomposed export + cache code shipped. **Parity cos=1.0 ✅**, **LIBERO cache-off 28/30 = monolithic baseline ✅**, **latency probe 9.1× on matched inputs ✅**. BUT cache-on LIBERO = 25/30 < 28/30 — cache doesn't hit in production because **pi0.5 tokenizes proprio state INTO the language prompt**, so `lang_tokens` drifts every frame regardless of task description. The 9.1× latency probe fed bit-identical inputs so the cache hit; in actual deployment pi0.5 lang drifts → 0% hit rate. Structural issue documented in `reflex_vault/02_research/2026-04-22-pi05-state-in-language-invalidates-prefix-cache.md`. Remediations: (a) action-chunk cache keyed on raw obs (works regardless, another 10× on top); (b) split static prompt vs dynamic state in preprocessor; (c) pivot: prefix cache is a pi0-only feature. Shipped files: `src/reflex/exporters/decomposed.py`, `src/reflex/runtime/pi05_decomposed_server.py`, `scripts/modal_{export,verify,libero,latency}_pi05_decomposed.py`."

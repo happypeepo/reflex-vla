@@ -604,6 +604,256 @@ def _resolve_snapflow_pi05_class() -> type:
     return SnapFlowPI05Pytorch
 
 
+# ─────────────────────────────────────────────────────────────────────
+# v0.5 — StateOut variant: student takes proprio state as an explicit
+# input (via state_proj), instead of pi0.5's default state-in-language
+# tokenization. Unlocks the prefix KV cache in production because
+# lang_tokens becomes stable per episode (only task description, no
+# drifting state tokens). Design: ``reflex_vla/01_architecture/
+# distill_state_out_pi05_design.md``. Status: scaffolding as of
+# 2026-04-22 — distill training pipeline + preprocessor override to
+# strip state from lang are the remaining work.
+# ─────────────────────────────────────────────────────────────────────
+
+_SNAPFLOW_PI05_STATE_OUT_CLASS: Any = None
+
+
+def _resolve_snapflow_pi05_state_out_class() -> type:
+    """Build the SnapFlowPI05StateOutPytorch subclass.
+
+    Extends SnapFlowPI05Pytorch with:
+      - embed_suffix that accepts explicit ``state`` tensor and prepends
+        ``state_proj(state)`` to the suffix embedding (pi0 pattern),
+      - denoise_step that threads state through,
+      - sample_actions_1step with state as a first-class arg.
+
+    Requires ``enable_snapflow_state_out(model)`` to have been called
+    first so that ``model.state_proj`` is a registered submodule.
+    """
+    global _SNAPFLOW_PI05_STATE_OUT_CLASS
+    if _SNAPFLOW_PI05_STATE_OUT_CLASS is not None:
+        return _SNAPFLOW_PI05_STATE_OUT_CLASS
+
+    import torch
+    import torch.nn.functional as F
+    from lerobot.policies.pi05.modeling_pi05 import (
+        create_sinusoidal_pos_embedding,
+        make_att_2d_masks,
+    )
+
+    parent = _resolve_snapflow_pi05_class()
+
+    class SnapFlowPI05StateOutPytorch(parent):
+        """v0.5 StateOut student. Inherits target_time machinery from
+        SnapFlowPI05Pytorch; adds explicit state input via state_proj."""
+
+        def embed_suffix(  # type: ignore[override]
+            self,
+            noisy_actions,
+            timestep,
+            target_time=None,
+            state=None,
+        ):
+            """Prepend ``state_proj(state)`` to the suffix, then fall
+            through parent's SnapFlow embed_suffix body. State MUST be
+            provided — the parent's signature had state=None as a no-op
+            path; here we require state so the student actually uses it.
+            """
+            if state is None:
+                raise ValueError(
+                    "SnapFlowPI05StateOutPytorch.embed_suffix requires "
+                    "state=<tensor>; student architecture depends on it"
+                )
+            if self.state_proj.weight.dtype == torch.float32 and state.dtype != torch.float32:
+                state = state.to(torch.float32)
+
+            state_emb = self.state_proj(state)
+            # Parent embed_suffix builds a sequence starting with action_emb.
+            # We run parent to get (embs_without_state, pad_masks, att_masks,
+            # adarms_cond) then prepend state token at position 0.
+            embs_no_state, pad_masks_no_state, att_masks_no_state, adarms_cond = (
+                super().embed_suffix(noisy_actions, timestep, target_time=target_time)
+            )
+            bsize = state_emb.shape[0]
+            device = state_emb.device
+            state_token = state_emb[:, None, :]
+            state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
+            state_att_flag = torch.ones(
+                bsize, 1, dtype=att_masks_no_state.dtype, device=device,
+            )
+
+            embs = torch.cat([state_token, embs_no_state], dim=1)
+            pad_masks = torch.cat([state_mask, pad_masks_no_state], dim=1)
+            att_masks = torch.cat([state_att_flag, att_masks_no_state], dim=1)
+
+            return embs, pad_masks, att_masks, adarms_cond
+
+        def denoise_step(  # type: ignore[override]
+            self,
+            prefix_pad_masks,
+            past_key_values,
+            x_t,
+            timestep,
+            target_time=None,
+            state=None,
+        ):
+            """Parent denoise_step but with state threaded through
+            embed_suffix instead of the ignored-state pi0.5 default."""
+            import copy
+
+            if state is None:
+                raise ValueError(
+                    "SnapFlowPI05StateOutPytorch.denoise_step requires state"
+                )
+            suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(
+                x_t, timestep, target_time=target_time, state=state,
+            )
+
+            suffix_len = suffix_pad_masks.shape[1]
+            batch_size = prefix_pad_masks.shape[0]
+            prefix_len = prefix_pad_masks.shape[1]
+
+            prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
+                batch_size, suffix_len, prefix_len,
+            )
+            suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+            full_att_2d_masks = torch.cat(
+                [prefix_pad_2d_masks, suffix_att_2d_masks], dim=2,
+            )
+
+            prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+            position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+
+            full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
+            self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"  # noqa: SLF001
+
+            past_key_values = _detach_kv_cache_deep(past_key_values)
+            past_key_values = copy.deepcopy(past_key_values)
+
+            outputs_embeds, _ = self.paligemma_with_expert.forward(
+                attention_mask=full_att_2d_masks_4d,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=[None, suffix_embs],
+                use_cache=False,
+                adarms_cond=[None, adarms_cond],
+            )
+
+            suffix_out = outputs_embeds[1]
+            suffix_out = suffix_out[:, -self.config.chunk_size:]
+            suffix_out = suffix_out.to(dtype=self.action_out_proj.weight.dtype)
+            return self.action_out_proj(suffix_out)
+
+        @torch.no_grad()
+        def sample_actions_1step(  # type: ignore[override]
+            self,
+            images,
+            img_masks,
+            tokens,
+            masks,
+            state,
+            noise=None,
+        ):
+            """SnapFlow 1-NFE inference for the state-out student. Note:
+            signature now matches the pi0 path (state is a required arg).
+            `tokens` and `masks` should be the task-description-only
+            tokenization — strip state tokens at the harness / preprocessor
+            layer; this class doesn't re-tokenize."""
+            bsize = tokens.shape[0]
+            device = tokens.device
+
+            if noise is None:
+                actions_shape = (
+                    bsize, self.config.chunk_size, self.config.max_action_dim,
+                )
+                noise = self.sample_noise(actions_shape, device)
+
+            prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+                images, img_masks, tokens, masks,
+            )
+            prefix_att_2d = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+            prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+            prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d)
+            self.paligemma_with_expert.paligemma.model.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+
+            _, past_key_values = self.paligemma_with_expert.forward(
+                attention_mask=prefix_att_2d_masks_4d,
+                position_ids=prefix_position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, None],
+                use_cache=True,
+            )
+
+            time = torch.ones(bsize, dtype=torch.float32, device=device)
+            action_dtype = self.action_in_proj.weight.dtype
+            x_t = noise.to(action_dtype)
+            v_t = self.denoise_step(
+                prefix_pad_masks=prefix_pad_masks,
+                past_key_values=past_key_values,
+                x_t=x_t,
+                timestep=time,
+                target_time=time,
+                state=state,
+            )
+            return (x_t - v_t).to(noise.dtype)
+
+    _SNAPFLOW_PI05_STATE_OUT_CLASS = SnapFlowPI05StateOutPytorch
+    return SnapFlowPI05StateOutPytorch
+
+
+def enable_snapflow_state_out(model: Any, state_dim: int | None = None) -> None:
+    """Add target_time_embed_mlp + state_proj and swap to the StateOut class.
+
+    Mirrors ``enable_snapflow`` but for pi0.5 only, with one extra step:
+    registers ``state_proj`` = Linear(state_dim → expert_hidden_dim),
+    initialized with small normal weights so the student can
+    immediately learn to use state (unlike target_time_embed_mlp which
+    starts zero — state_proj needs nonzero init or it's stuck ignoring
+    state).
+
+    Args:
+        model: PI05Pytorch instance.
+        state_dim: proprio state dimension. If None, read from
+            ``model.config.max_state_dim`` (pi0.5 convention).
+    """
+    import torch
+    import torch.nn as nn
+    from lerobot.policies.pi05.modeling_pi05 import PI05Pytorch
+
+    if not isinstance(model, PI05Pytorch):
+        raise TypeError(
+            f"enable_snapflow_state_out expects PI05Pytorch; got {type(model).__name__}"
+        )
+
+    # Step 1: install target_time_embed_mlp + swap to SnapFlowPI05Pytorch.
+    enable_snapflow(model)
+
+    # Step 2: add state_proj (small-nonzero init).
+    state_dim = state_dim or getattr(model.config, "max_state_dim", None)
+    if state_dim is None:
+        raise ValueError(
+            "state_dim not provided and model.config.max_state_dim missing"
+        )
+    expert_hidden = model.action_in_proj.out_features
+    state_proj = nn.Linear(state_dim, expert_hidden)
+    # Small-scale init: keeps student close to parent initially, but not
+    # zero (which would have the student ignore state entirely).
+    with torch.no_grad():
+        state_proj.weight.normal_(mean=0.0, std=0.02)
+        state_proj.bias.zero_()
+    ref_param = next(model.parameters())
+    state_proj = state_proj.to(dtype=ref_param.dtype, device=ref_param.device)
+    model.add_module("state_proj", state_proj)
+
+    # Step 3: swap class to the StateOut variant (subclass of SnapFlowPI05).
+    state_out_cls = _resolve_snapflow_pi05_state_out_class()
+    model.__class__ = state_out_cls
+    logger.info(
+        "[snapflow-state-out] enabled on pi05 (state_dim=%d, expert_hidden=%d)",
+        state_dim, expert_hidden,
+    )
+
+
 def load_snapflow_student(checkpoint_path: Any) -> Any:
     """Load a SnapFlow-distilled student checkpoint from a reflex-saved dir.
 
