@@ -262,7 +262,7 @@ def run_decomposed_libero(
     from reflex.runtime.pi05_decomposed_server import Pi05DecomposedInference
     inference = Pi05DecomposedInference(
         export_dir=decomposed_dir,
-        providers=["CPUExecutionProvider"],
+        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
         enable_cache=(cache_mode == "phash"),
         cache_ttl_sec=cache_ttl_sec,
         phash_hamming_threshold=phash_hamming,
