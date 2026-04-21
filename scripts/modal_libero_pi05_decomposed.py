@@ -101,7 +101,9 @@ image = (
         "pydantic>=2.0",
         "pyyaml",
         "onnx>=1.16",
-        "onnxruntime>=1.20",
+        "onnxruntime-gpu>=1.20,<1.24",
+        "nvidia-cudnn-cu12>=9.0,<10.0",
+        "nvidia-cublas-cu12>=12.0,<13.0",
         "onnxscript>=0.1",
         "mujoco==3.3.2",
         "robosuite==1.4.1",
@@ -139,6 +141,13 @@ image = (
         "LIBERO_ASSET_DIR": "/opt/LIBERO/libero/libero/assets",
         "LIBERO_BASE": "/tmp/libero_data",
         "PYTHONPATH": "/opt/LIBERO",
+        # Point onnxruntime-gpu at the CUDA libs bundled as pip packages
+        # so the CUDAExecutionProvider actually loads on A100.
+        "LD_LIBRARY_PATH": (
+            "/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:"
+            "/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:"
+            "/usr/local/cuda/lib64"
+        ),
     })
     .run_commands("mkdir -p /tmp/libero_data")
 )

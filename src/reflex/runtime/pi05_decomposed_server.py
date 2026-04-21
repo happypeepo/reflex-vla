@@ -114,7 +114,11 @@ class Pi05DecomposedInference:
         self.enable_cache = enable_cache
         self.cache_ttl_sec = cache_ttl_sec
         self.phash_hamming_threshold = phash_hamming_threshold
-        self._providers = providers or ["CPUExecutionProvider"]
+        # Default prefers CUDA when available, falls back to CPU if the
+        # runtime doesn't have GPU providers. LIBERO eval on an A100 box
+        # runs ~50× faster on GPU; only use CPU explicitly when matching
+        # PyTorch reference bytes (parity tests).
+        self._providers = providers or ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
         cfg_path = self.export_dir / "reflex_config.json"
         if not cfg_path.exists():
