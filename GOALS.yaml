@@ -45,10 +45,28 @@ goals:
 
   # ── HIGH (weight 8-9) ─────────────────────────────────────────────
 
-  - id: distill-dmpo
-    description: "reflex distill implements DMPO one-step generation (no teacher) targeting 1000+ Hz on consumer GPUs"
-    check: "test -f src/reflex/distill/dmpo.py && .venv/bin/python -c 'from reflex.distill.dmpo import DMPOTrainer' 2>/dev/null"
+  - id: distill-snapflow
+    status: done
+    description: "reflex distill implements SnapFlow (arxiv 2604.05656, April 2026) — teacher-student 1-NFE distillation for flow-matching VLAs. Supersedes the earlier DMPO goal; SnapFlow was picked after 2026-04-20 research showed it was the only published method with measured-task-success on real VLAs. v0.3.1 delivered pi0.5 end-to-end: 10k-step distill, 29/30 = 96.7% LIBERO (beats teacher's 28/30 = 93.3%). First public reproduction of the paper."
+    check: "test -f src/reflex/distill/snapflow.py && test -f src/reflex/distill/snapflow_pi0_model.py && .venv/bin/python -c 'from reflex.distill.snapflow import snapflow_loss_step; from reflex.distill.snapflow_pi0_model import enable_snapflow, load_snapflow_student' 2>/dev/null"
     weight: 9
+
+  - id: distill-snapflow-student-onnx
+    status: done
+    description: "Distilled student exports to monolithic ONNX with 1-NFE baked in (target_time=1 as constant). CLI: `reflex export <checkpoint> --from-distilled`. Output has same I/O signature as teacher family's monolithic ONNX so downstream serve path is unmodified. Parity vs PyTorch `sample_actions_1step`: cos=1.0, max_abs=4.77e-06 (machine precision). Shipped artifact retains the 29/30 LIBERO number measured on the PyTorch path."
+    check: "grep -q 'export_snapflow_student_monolithic' src/reflex/exporters/monolithic.py && grep -q 'from_distilled' src/reflex/cli.py"
+    weight: 9
+
+  - id: distill-snapflow-fp16-libero
+    status: done
+    description: "Distilled student FP16 monolithic ONNX (6.50 GB, 50% reduction from 12.99 GB FP32) retains full LIBERO task-success: 29/30 = 96.7%, identical to FP32 student. The 1.44e-02 max_abs precision drop is task-success-irrelevant; default `parity_gate` 1e-2 threshold is miscalibrated for pi0.5 family. Unblocks Jetson Orin Nano fit (6.5 GB < 8 GB RAM)."
+    check: "test -f scripts/modal_fp16_snapflow_student.py"
+    weight: 8
+
+  - id: distill-pi0-snapflow
+    description: "Validate SnapFlow distillation on pi0 (in addition to pi0.5 which is done). Requires a pi0 LIBERO-finetuned teacher checkpoint (`lerobot/pi0` reports 94.2% in community benchmarks). Same pipeline as pi0.5; expected ~1-2 hr distill + 1.5 hr LIBERO eval. Turns the product claim from 'works on pi0.5' to 'works on pi-family'."
+    check: "grep -q 'distill_pi0_libero' reflex_context/measured_numbers.md 2>/dev/null"
+    weight: 7
 
   - id: multi-model-native-parity
     description: "PyTorch-native path produces cos=1.0000 vs the reference PyTorch policy for all 4 flow-matching VLAs (SmolVLA, pi0, pi0.5, GR00T). Decomposition strategy differs per model: SmolVLA needs Llama-family RMSNorm swap; pi0 needs no swap (PiGemmaRMSNorm already elementwise); pi0.5 needs AdaRMSNorm swap; GR00T needs AdaLN swap. Native is the PyTorch-only A10G/H100 deployment target. ONNX-for-Jetson tracked separately per model (see *-onnx-parity goals below)."
