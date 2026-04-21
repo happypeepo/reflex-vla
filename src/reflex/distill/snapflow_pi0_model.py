@@ -445,8 +445,14 @@ def _resolve_snapflow_pi05_class() -> type:
                     max_period=self.config.max_period,
                     device=tt.device,
                 )
-                tt_emb = tt_emb.type(dtype=time_emb.dtype)
-                time_emb = time_emb + self.target_time_embed_mlp(tt_emb)
+                # Cast to MLP's dtype (bf16 during training/inference),
+                # not time_emb's dtype (which follows timestep, often fp32).
+                # Otherwise bf16 model + fp32 timestep → F.linear dtype
+                # mismatch at MLP's first Linear layer.
+                mlp_dtype = self.target_time_embed_mlp[0].weight.dtype
+                tt_emb = tt_emb.to(mlp_dtype)
+                mlp_out = self.target_time_embed_mlp(tt_emb)
+                time_emb = time_emb + mlp_out.to(time_emb.dtype)
 
             def action_proj_func(noisy_actions):
                 return self.action_in_proj(noisy_actions)
