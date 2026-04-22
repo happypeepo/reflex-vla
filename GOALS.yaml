@@ -525,3 +525,35 @@ goals:
     description: "When client (robot driver) and server (Reflex) are on the SAME Jetson, skip HTTP and use shared-memory transport for image + state input + action output. Triton has /dev/shm pattern. ~5-15%% latency reduction by eliminating serialization + socket overhead. Only relevant for on-device deployment (the primary Reflex use case). DEFERRED to Phase 2-3 when hardware bundles ship."
     check: "test -f src/reflex/runtime/shm_transport.py 2>/dev/null"
     weight: 3
+
+  # ── ARXIV-DRIVEN VLA-SPECIFIC GOALS (added 2026-04-22 PM) ─────────
+  # From parallel research agent — 20 arxiv papers surveyed, these 5
+  # are the ones that apply directly to Reflex + are not already on the
+  # roadmap. Full analysis in reference/arxiv_advanced_techniques.md.
+  # Each is 'VLA-specific inference insight that general servers can't
+  # easily copy' — exactly what our wedge is about.
+
+  - id: serve-a2c2-correction-head
+    description: "A2C2 plug-in correction head (arXiv 2509.23224). Small bolt-on network that corrects RTC overshoot/undershoot on high-latency deployments (Jetson is the canonical use case). No retraining of the base VLA — just train the correction head on deployment traces. Solves 'RTC on Jetson has poor reactivity because inference takes 40-80ms'. High leverage — a week of work for a meaningful Jetson-latency win. Ships as add-on to RTC wedge."
+    check: "test -f src/reflex/kernels/a2c2_correction.py 2>/dev/null"
+    weight: 8
+
+  - id: serve-reflex-optimize-command
+    description: "`reflex optimize <model>` — bundle EfficientVLA (arXiv 2506.10100) + dKV-Cache (arXiv 2505.15781) + FlashVLA (arXiv 2505.21200) as one CLI command that transforms any VLA → 3-5x faster inference. This is the packaging opportunity: each paper alone is a research artifact, but bundling them behind a single CLI invocation is a product. Competitive moat because it requires VLA-specific knowledge (which layers to cache, which ops to fuse, which attention patterns to skip) that general servers don't have."
+    check: "grep -q 'reflex optimize\\|def optimize_model' src/reflex/cli.py 2>/dev/null"
+    weight: 9
+
+  - id: serve-dexmal-3stage-streaming
+    description: "Three-stage streaming inference pattern from Dexmal realtime-vla (arXiv 2510.26742) + Figure's Helix fast/slow framing. Splits inference into: (1) VLM encode (slow, per-episode), (2) expert denoise (fast, per-chunk), (3) action execution thread (continuous, per-timestep). Lets the motor stream continuously while upstream stages run async. Architectural — positions Reflex on the production pattern Figure uses. Complements episode cache (stage 1) + RTC (stage 2-3 overlap)."
+    check: "grep -q 'three_stage\\|motor_stream\\|stage_executor' src/reflex/runtime/*.py 2>/dev/null"
+    weight: 7
+
+  - id: serve-training-time-rtc-support
+    description: "Training-Time RTC (arXiv 2512.05964) is how pi-0.6 and newer VLAs will be trained — RTC constraints baked in at training time instead of bolted on at inference. Reflex should detect train-time-RTC checkpoints (via config flag) and enable the matching fast-path in serve. Low engineering cost, high compatibility value — being the first inference stack to support pi-0.6 at launch is a wedge for that model family."
+    check: "grep -q 'train_time_rtc\\|rtc_trained' src/reflex/ 2>/dev/null"
+    weight: 5
+
+  - id: serve-jetson-thor-fp4-jetpack71
+    description: "Jetson Thor + JetPack 7.1 + FP4 quantization + GR00T N1.7 support. Thor ships in volume in 2026 and will be the primary bundle target. FP4 halves memory vs FP8 and 4x vs FP16 — required to fit larger VLAs on Thor's 64GB. JetPack 7.1 is the SDK. GR00T N1.7 is the next NVIDIA reference VLA. Table-stakes for Phase 2 bundles."
+    check: "grep -q 'jetson_thor\\|fp4\\|jetpack_71' src/reflex/exporters/ 2>/dev/null"
+    weight: 5
