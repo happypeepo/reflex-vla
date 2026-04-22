@@ -130,6 +130,18 @@ def bench(
         noise=rng.standard_normal((B, 50, 32)).astype(np.float32),
     )
 
+    # State-out variant: decomposed export with expert_takes_state=True
+    # requires a state input. Detect from reflex_config.json and add it.
+    import json as _json
+    from pathlib import Path as _Path
+    cfg_path = _Path(decomposed_dir) / "reflex_config.json"
+    if cfg_path.exists():
+        with cfg_path.open() as _f:
+            _cfg = _json.load(_f)
+        if _cfg.get("decomposed", {}).get("expert_takes_state"):
+            # max_state_dim is 32 for pi0.5
+            obs["state"] = rng.standard_normal((B, 32)).astype(np.float32)
+
     # ---- Baseline: cache disabled (every call is a miss) ----
     inf_miss = Pi05DecomposedInference(
         export_dir=decomposed_dir,
