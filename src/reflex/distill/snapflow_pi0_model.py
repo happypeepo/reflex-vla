@@ -991,11 +991,24 @@ def load_snapflow_student(checkpoint_path: Any) -> Any:
 
     full_state = load_file(str(sf_path))
     mlp_prefix = "model.target_time_embed_mlp."
-    base_state = {k: v for k, v in full_state.items() if not k.startswith(mlp_prefix)}
+    state_proj_prefix = "model.state_proj."
+    base_state = {
+        k: v for k, v in full_state.items()
+        if not k.startswith(mlp_prefix) and not k.startswith(state_proj_prefix)
+    }
     mlp_state = {
         k[len(mlp_prefix):]: v
         for k, v in full_state.items() if k.startswith(mlp_prefix)
     }
+    state_proj_state = {
+        k[len(state_proj_prefix):]: v
+        for k, v in full_state.items() if k.startswith(state_proj_prefix)
+    }
+
+    # State-out variant (v0.5+) saves model.state_proj.{weight,bias} keys.
+    # The base PI05Policy doesn't have a state_proj submodule, so we strip
+    # these from base_state and route through enable_snapflow_state_out.
+    is_state_out_student = bool(state_proj_state)
 
     policy_cls = _dispatch_policy_class(path)
 
@@ -1020,7 +1033,15 @@ def load_snapflow_student(checkpoint_path: Any) -> Any:
                     json.dump(stripped, f, indent=2)
         policy = policy_cls.from_pretrained(str(td_path))
 
-    enable_snapflow(policy.model)
+    if is_state_out_student:
+        enable_snapflow_state_out(policy.model)
+        logger.info(
+            "[load_snapflow_student] detected state-out variant — enabled "
+            "state_proj submodule (will load %d keys)",
+            len(state_proj_state),
+        )
+    else:
+        enable_snapflow(policy.model)
 
     if not mlp_state:
         logger.warning(
@@ -1029,6 +1050,9 @@ def load_snapflow_student(checkpoint_path: Any) -> Any:
             "If this is a trained distill output, the checkpoint is corrupt.",
             path,
         )
+        if is_state_out_student and state_proj_state:
+            policy.model.state_proj.load_state_dict(state_proj_state, strict=True)
+            logger.info("[load_snapflow_student] loaded state_proj weights")
         return policy
 
     missing, unexpected = policy.model.target_time_embed_mlp.load_state_dict(
@@ -1038,6 +1062,16 @@ def load_snapflow_student(checkpoint_path: Any) -> Any:
         logger.warning("[load_snapflow_student] missing mlp keys: %s", missing)
     if unexpected:
         logger.warning("[load_snapflow_student] unexpected mlp keys: %s", unexpected)
+
+    if is_state_out_student and state_proj_state:
+        sp_missing, sp_unexpected = policy.model.state_proj.load_state_dict(
+            state_proj_state, strict=True,
+        )
+        if sp_missing:
+            logger.warning("[load_snapflow_student] missing state_proj keys: %s", sp_missing)
+        if sp_unexpected:
+            logger.warning("[load_snapflow_student] unexpected state_proj keys: %s", sp_unexpected)
+
     logger.info("[load_snapflow_student] loaded student from %s", path)
     return policy
 

@@ -252,6 +252,17 @@ def run_ported_libero(
         repo_dir = snapshot_download(model_id)
 
     policy.eval().to("cuda").to(torch.float32)
+
+    # v0.5 state-out detection: if the loaded student is the state-out
+    # variant, the preprocessor must be patched to strip state from the
+    # language prompt and emit OBS_STATE as a separate batch key.
+    is_state_out = (
+        snapflow_student
+        and type(policy.model).__name__ == "SnapFlowPI05StateOutPytorch"
+    )
+    if is_state_out:
+        print(f"[ported] Detected v0.5 state-out student — will swap preprocessor")
+
     preprocessor = PolicyProcessorPipeline.from_pretrained(
         pretrained_model_name_or_path=repo_dir,
         config_filename="policy_preprocessor.json",
@@ -259,6 +270,11 @@ def run_ported_libero(
         to_output=transition_to_batch,
         overrides={"device_processor": {"device": "cuda"}},
     )
+    if is_state_out:
+        from reflex.distill.pi05_state_out_processor import swap_prepare_step_in_pipeline
+        max_state_dim = getattr(policy.config, "max_state_dim", 32)
+        swap_prepare_step_in_pipeline(preprocessor, max_state_dim=max_state_dim)
+        print(f"[ported] Swapped preprocessor for state-out (max_state_dim={max_state_dim})")
     # Postprocessor unnormalizes policy output back to env action space.
     # Without this, predict_action_chunk returns normalized (zero-mean,
     # unit-variance) values which the env interprets as wildly wrong
@@ -474,10 +490,14 @@ def run_ported_libero(
                                 elif use_1nfe:
                                     # SnapFlow 1-NFE: single denoise_step
                                     # at target_time=1 via the subclass override.
-                                    # pi0.5 signature differs from pi0 — no state.
+                                    # Three signatures depending on policy:
+                                    #   pi0:                state required
+                                    #   pi0.5 (default):    no state
+                                    #   pi0.5 (state-out, v0.5): state required
                                     from lerobot.utils.constants import (
                                         OBS_LANGUAGE_ATTENTION_MASK,
                                         OBS_LANGUAGE_TOKENS,
+                                        OBS_STATE,
                                     )
                                     images, img_masks = policy._preprocess_images(batch_pp)
                                     lang_tokens = batch_pp[OBS_LANGUAGE_TOKENS]
@@ -488,8 +508,19 @@ def run_ported_libero(
                                         chunk = policy.model.sample_actions_1step(
                                             images, img_masks, lang_tokens, lang_masks, state_t,
                                         )
+                                    elif is_state_out:
+                                        # pi0.5 state-out variant (v0.5): state from preprocessor
+                                        state_t = batch_pp[OBS_STATE]
+                                        # Pad state to max_state_dim if needed
+                                        max_sd = policy.model.state_proj.in_features
+                                        if state_t.shape[-1] < max_sd:
+                                            import torch.nn.functional as F
+                                            state_t = F.pad(state_t, (0, max_sd - state_t.shape[-1]))
+                                        chunk = policy.model.sample_actions_1step(
+                                            images, img_masks, lang_tokens, lang_masks, state_t,
+                                        )
                                     else:
-                                        # pi0.5 path: no state
+                                        # pi0.5 default path: no state
                                         chunk = policy.model.sample_actions_1step(
                                             images, img_masks, lang_tokens, lang_masks,
                                         )
