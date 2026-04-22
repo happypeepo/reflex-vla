@@ -66,7 +66,7 @@ ONNX_OUT = "/onnx_out"
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git")
+    .apt_install("git", "ffmpeg")
     .pip_install(
         "lerobot==0.5.1",
         "transformers==5.3.0",
