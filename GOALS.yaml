@@ -410,8 +410,8 @@ goals:
     weight: 2
 
   - id: serve-rtc-wrapper
-    description: "Wrap lerobot.policies.rtc for Real-Time Chunking (replan-while-execute pattern from arxiv 2506.07339). Pi0/pi05 are designed to be run with RTC; without it serve leaves 2-3x throughput on the table. PROMOTED to weight 10 (2026-04-22 PM) after cross-timestep cache moat falsified — RTC is now the #2 serve item after A2C2. Design grounded in reference/deep_dive_lerobot_rtc.md."
-    check: "grep -q 'rtc\\|RTC\\|real_time_chunking' src/reflex/runtime/*.py 2>/dev/null"
+    description: "Wrap lerobot.policies.rtc for Real-Time Chunking (replan-while-execute pattern from arxiv 2506.07339). Pi0/pi05 are designed to be run with RTC; without it serve leaves 2-3x throughput on the table. Skeleton shipped 2026-04-23 (commit f8b529c, src/reflex/runtime/rtc_adapter.py). Full build: 5-7 days once per-embodiment configs land. Design grounded in reference/deep_dive_lerobot_rtc.md (692 lines). Downstream research: learned-RTC-schedule from deployment traces (reasoning doc #3) — Phase 2+ after base RTC ships."
+    check: "test -f src/reflex/runtime/rtc_adapter.py && grep -q 'class RtcAdapter' src/reflex/runtime/rtc_adapter.py 2>/dev/null"
     weight: 10
 
   - id: serve-one-line-install
@@ -564,15 +564,69 @@ goals:
     check: "grep -q 'jetson_thor\\|fp4\\|jetpack_71' src/reflex/exporters/ 2>/dev/null"
     weight: 5
 
+  # ── DISTINCTIVE FEATURES (promoted from reflex_context/reasoning/serve_best_in_world_strategy.md) ──
+  # The reasoning doc argues these 5 features, stacked on plan v3's foundation,
+  # shift Reflex from "a good VLA inference server" to "the undeniable best one."
+  # ~80% of required infrastructure is already in plan v3 (record/replay,
+  # per-embodiment configs, compile cache, telemetry). Net new: 12-16 weeks
+  # across Phase 1. Each feature reinforces the others (combined moat story):
+  # "your robot gets better with use, auto-configures on install, debuggable
+  # end-to-end, caches at scene-level, deploys in one command."
+
+  - id: serve-auto-calibration
+    description: "On new deploys, first 10 episodes auto-tune per-embodiment config (normalization stats, velocity limits, RTC horizon, phash thresholds) from recorded trajectories. No manual config required — 'install Reflex, run 10 episodes, it configures itself.' Extends per-embodiment configs (weight 7) + record/replay (weight 8). Huge first-run UX win. 3-4 weeks build. Reasoning: reflex_context/reasoning/serve_best_in_world_strategy.md #16."
+    check: "test -f src/reflex/calibrate.py 2>/dev/null && grep -q 'auto_calibrate\\|reflex calibrate' src/reflex/cli.py 2>/dev/null"
+    weight: 8
+
+  - id: serve-scene-conditional-cache
+    description: "Upgrade action-chunk cache key from image phash (brittle to lighting/camera jitter) to scene-level semantic features (CLIP embedding or similar). Same 'picking up the red cup' scenes hit cache even when pixels differ. Cheapest distinctive feature: 2-3 weeks, reuses existing action-chunk cache path in pi05_decomposed_server. Reasoning: reflex_context/reasoning/serve_best_in_world_strategy.md #4."
+    check: "grep -q 'scene_feature\\|clip_embed\\|semantic_cache' src/reflex/runtime/pi05_decomposed_server.py 2>/dev/null"
+    weight: 7
+
+  - id: serve-self-distilling
+    description: "THE MOST DURABLE MOAT (18mo replication window). Reflex runs background SnapFlow distillation on collected deployment traces. After N episodes, customer-specific student is A/B tested; if matches teacher on their tasks, promoted as production model. Robot gets faster with use. Pitch: 'the only serving product where your model improves by using it.' Requires record/replay (weight 8) + A/B harness + hot-swap. MVP 4-6 weeks (weekly cloud distill + manual A/B); full 8-12 weeks (online self-distill). Reasoning: reflex_context/reasoning/serve_best_in_world_strategy.md #1."
+    check: "test -f src/reflex/distill/online.py 2>/dev/null && grep -q 'online_distill\\|self_distill' src/reflex/cli.py 2>/dev/null"
+    weight: 8
+
+  - id: serve-interpretability-replay
+    description: "Every /act replay can be re-run with interpretability hooks enabled — attention maps, per-chunk action distributions, intermediate activations. Customer hits 'explain this failure' → sees which scene region the model attended to, which action dims varied most. Unique debugging moat (nobody has this for VLAs). Extends record/replay (weight 8). 6-10 weeks build. Reasoning: reflex_context/reasoning/serve_best_in_world_strategy.md #10."
+    check: "test -f src/reflex/runtime/interpretability.py 2>/dev/null && grep -q 'attention_maps\\|explain' src/reflex/cli.py 2>/dev/null"
+    weight: 7
+
+  - id: serve-one-command-deploy
+    description: "THE DX KEYSTONE. `reflex deploy <robot-id>` does everything: detects embodiment, downloads matching config + distilled student from Reflex HF hub, compiles for customer's Jetson, runs safety check, starts serving, registers with monitoring. Integrates per-embodiment configs + auto-calibration + compile cache + telemetry + HF Hub. 4-6 weeks AFTER all components exist. Reasoning: reflex_context/reasoning/serve_best_in_world_strategy.md #20."
+    check: "grep -q 'def deploy_command\\|def cmd_deploy' src/reflex/cli.py 2>/dev/null"
+    weight: 8
+
+  # ── PHASE 0.5 FOUNDATION GOALS (extended from plan v3, promoted from features/ only) ──
+  # These are table-stakes items in the plan v3 Milestone A / Phase 0.5 foundation
+  # but weren't previously in GOALS.yaml. Promoted now so the source-of-truth
+  # (GOALS.yaml) tracks them and monitors.yaml detection signals align.
+
+  - id: serve-per-embodiment-configs
+    description: "JSON/YAML schema + 3 presets (Franka / SO-100 / UR5). Encodes action_space (type, dim, ranges), normalization (mean/std), gripper (idx, thresholds, inverted), cameras (resolution+fps+color_space), control (frequency_hz, chunk_size, rtc_execution_horizon), constraints (max_ee_velocity, max_gripper_velocity). PHASE 0.5 FOUNDATION — unblocks RTC adapter, A2C2, action denormalization, reflex doctor, auto-calibration. 2-4 days. Plan ref: serve_technical_plan_v3.md §4.5 + features/serve/per-embodiment-configs.md."
+    check: "test -f configs/embodiments/franka.json 2>/dev/null && test -f configs/embodiments/so100.json 2>/dev/null && test -f configs/embodiments/ur5.json 2>/dev/null"
+    weight: 7
+
+  - id: serve-action-denormalization-safety-net
+    description: "Per-embodiment velocity/torque/position clamping in the serve path. Currently action unnormalizer runs in LIBERO eval harness but NOT in serve — that's a real bug (academic labs trust Reflex to guard). ROUND-2 CRITICAL FINDING: must elevate from Phase 2.4 → Phase 0.5 as safety prerequisite. 2-3 days. Requires per-embodiment configs. Plan ref: serve_technical_plan_v3.md §1 + features/serve/action-denormalization.md."
+    check: "grep -q 'action_denormalize\\|velocity_clamp\\|_denormalize_action' src/reflex/runtime/server.py 2>/dev/null"
+    weight: 7
+
+  - id: serve-reflex-doctor
+    description: "`reflex doctor` CLI command — 10 falsifiable checks mapped to LeRobot GitHub issues: (1) model load OOM #386/#414, (2) ONNX provider unavailable #2137, (3) VLM tokenization errors #2119/#683, (4) image dim mismatch #1700, (5) action denormalization #414/#2210, (6) gripper config inverted #2210/#2531, (7) state deserialization #2458, (8) GPU memory > capacity, (9) async RTC chunk boundary #2356/#2531, (10) CUDA/cuDNN version compat. HIGH-ROI first-deploy UX per round-2 customer voice. 2-3 days + doctor→error→doc-URL registry. Plan ref: serve_technical_plan_v3.md §4.4."
+    check: "test -f src/reflex/cli/doctor.py 2>/dev/null && grep -q 'reflex doctor\\|cmd_doctor' src/reflex/cli.py 2>/dev/null"
+    weight: 7
+
   # ── PLAN V3 ADDITIONS (added 2026-04-22 after serve_technical_plan_v3) ──
   # Two items surfaced during the serve v3 plan + its Appendix audit that
   # weren't previously in GOALS.yaml. Both track real priorities so
   # `monitors.yaml` detection signals align with goals.
 
   - id: serve-record-replay
-    description: "`reflex serve --record <dir>` dumps every /act request+response to disk with latency / cache-hit / guard-violation metadata. `reflex replay <file>` replays locally against a chosen model/config and diffs behavior. Unique value: robotics bugs happen in physical environments and are brutal to reproduce; nobody has this for VLAs today. Also produces the A2C2 correction head's training data (deployment traces) so A2C2 (weight 10) has a data pipeline before it starts. JSONL format specified in reflex_context/04_product/serve_technical_plan_v3.md Appendix D.1. 3-5 days to implement; ships in Phase 0.5 DX."
+    description: "`reflex serve --record <dir>` dumps every /act request+response to disk with latency / cache-hit / guard-violation metadata. `reflex replay <file>` replays locally against a chosen model/config and diffs behavior. Unique value: robotics bugs happen in physical environments and are brutal to reproduce; nobody has this for VLAs today. LOAD-BEARING for 4 downstream goals: (1) A2C2 correction head training data (weight 10), (2) serve-auto-calibration (weight 8), (3) serve-self-distilling (weight 8), (4) serve-interpretability-replay (weight 7). Without this, those 4 goals block. JSONL format specified in reflex_context/04_product/serve_technical_plan_v3.md Appendix D.1. 3-5 days to implement; ships in Phase 0.5 DX."
     check: "test -f src/reflex/runtime/record.py 2>/dev/null && grep -q 'def replay' src/reflex/cli.py 2>/dev/null"
-    weight: 8
+    weight: 9
 
   - id: serve-cloud-latency-matrix
     description: "Measure per-stage latency (VLM prefix / expert denoise / postprocess) across A10G + A100-80GB + H100 with p50/p95/p99 on pi0.5 decomposed + SmolVLA + pi0 FP16 + GR00T monolithic. Validates the projected-from-A10G scaling assumptions in serve_technical_plan_v3.md Appendix A BEFORE any Jetson measurements land. Writes per-hardware YAML to baselines/<hw>/<model>/<precision>.yaml per Appendix D.3 schema. 1-2 hr Modal + ~\\$5. Unblocks the `reflex bench` comparison feature and validates/invalidates the 'FA3 is 0% on ONNX serve path' claim flagged as `[unverified]` in Appendix A."
