@@ -487,6 +487,15 @@ def _build_pi05_adapters(teacher: Any, student: Any):
             # reaches obs_kwargs here.
             from lerobot.utils.constants import OBS_STATE
             state_vec = obs_kwargs[OBS_STATE]
+            # Pad to max_state_dim — LIBERO state is 8-dim but pi0.5
+            # state_proj is sized to max_state_dim=32. Pi0's prepare_state
+            # does this padding; pi0.5 didn't need it (state was in lang),
+            # so we replicate inline here for the state-out variant.
+            max_state_dim = policy.model.state_proj.in_features
+            cur = state_vec.shape[-1]
+            if cur < max_state_dim:
+                import torch.nn.functional as _F
+                state_vec = _F.pad(state_vec, (0, max_state_dim - cur))
             extra["state"] = state_vec
         return policy.model.denoise_step(
             prefix_pad_masks=prefix_pad_masks,
