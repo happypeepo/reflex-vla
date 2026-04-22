@@ -487,8 +487,9 @@ goals:
     weight: 2
 
   - id: serve-latency-microbench-cache
-    description: "Measure VLM prefix forward time vs expert denoise forward time on the v0.5 student decomposed ONNX. Theoretical cache speedup = (vlm_time + expert_time) / expert_time. Target ≥3x (per design VLM is ~80%% of compute). Cheap (~\$1, 30 min Modal). Independent of cache-on/off LIBERO test — gives the upper-bound number for product positioning."
-    check: "grep -q 'latency.*v050.*decomposed\\|microbench.*v0.5' reflex_context/03_experiments/ 2>/dev/null"
+    status: done
+    description: "DONE 2026-04-23 (Modal A100-80GB run ap-baQHJgfrR5SVSZqWh8fbCW). v0.5 state-out per-stage microbench: VLM prefix 88.24ms mean (89.8%% share), expert denoise 10.04ms mean. Theoretical speedup 9.79x — STRONGER than v0.3.1's 8.95x. Design assumption (VLM ≥80%% of compute) fully validated. Variance <2%% on both stages (static-shape payoff). SLO enforcement (p99 < 150ms) now practical on A100-class hardware. Proceeds with RTC adapter (weight 10) as top serve priority. Full writeup: reflex_context/03_experiments/2026-04-23-v050-decomposed-per-stage-latency.md. Script: scripts/modal_latency_v050_decomposed.py (commit 09d9a56)."
+    check: "test -f reflex_context/03_experiments/2026-04-23-v050-decomposed-per-stage-latency.md 2>/dev/null && grep -q '9.79\\|89.8' reflex_context/03_experiments/2026-04-23-v050-decomposed-per-stage-latency.md 2>/dev/null"
     weight: 7
 
   # ── ADVANCED SERVE PERF (Phase B kernel-level wins, 2026-04-22) ──
