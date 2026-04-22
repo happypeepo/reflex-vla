@@ -404,14 +404,15 @@ goals:
   # reflex_context/04_product/wedge_priority_ranking.md.
 
   - id: serve-episode-aware-cache
-    description: "Episode-aware prefix KV caching: serve tracks an episode_id, caches the VLM prefix per episode, denoise per timestep just runs the action expert. Drops per-call latency ~80ms→~15ms (5x). The killer feature Triton physically can't do — Triton is stateless, has no concept of an episode. Requires v0.5 state-out distill landing first (otherwise lang prompt drifts every frame and cache hit rate is 0% in production, as proven by 2026-04-22 latency probe vs LIBERO cache-on disagreement). Order: v0.5 stage-3 LIBERO eval ≥50% → cache plumbing in serve runtime → cache-on vs cache-off LIBERO + latency microbench."
+    status: failed
+    description: "[FAILED 2026-04-22 PM] Hypothesized 5x serve speedup via episode-keyed lang-only VLM prefix cache. Built and tested (commit 8e577a0): EpisodeCache class, lang-only key, image ignored. LIBERO test failed catastrophically — 3 consecutive TASK 0 timeouts vs cache=none baseline 5/5. Root cause: PaliGemma's past_kv encodes BOTH vision and language. When robot moves (every frame), reusing past_kv from frame 0 feeds the action expert stale visual context → wrong actions. The latency microbench (8.95x) used bit-identical inputs so cache reuse was correct; in real deployment image moves and reuse breaks behavior. Full writeup: reflex_vault 03_experiments/2026-04-22-prefix-cache-moat-honest-finding.md. Cache code retained (works for stable inputs) but NOT shipped as customer-facing default. The REAL moat is the within-call decomposed cache (already shipped via decomposed export). New top serve goal: A2C2 correction head."
     check: "grep -q 'episode_id' src/reflex/runtime/server.py 2>/dev/null"
-    weight: 10
+    weight: 2
 
   - id: serve-rtc-wrapper
-    description: "Wrap lerobot.policies.rtc for Real-Time Chunking (replan-while-execute pattern from arxiv 2506.07339). Pi0/pi05 are designed to be run with RTC; without it serve leaves 2-3x throughput on the table. Sprint week 1-2 work."
+    description: "Wrap lerobot.policies.rtc for Real-Time Chunking (replan-while-execute pattern from arxiv 2506.07339). Pi0/pi05 are designed to be run with RTC; without it serve leaves 2-3x throughput on the table. PROMOTED to weight 10 (2026-04-22 PM) after cross-timestep cache moat falsified — RTC is now the #2 serve item after A2C2. Design grounded in reference/deep_dive_lerobot_rtc.md."
     check: "grep -q 'rtc\\|RTC\\|real_time_chunking' src/reflex/runtime/*.py 2>/dev/null"
-    weight: 8
+    weight: 10
 
   - id: serve-one-line-install
     description: "pip install reflex-vla && reflex serve <hf-id> works on a Jetson with no Docker, no Triton YAML, no NVIDIA Container Toolkit. The DX win that beats Triton even though Triton wins on raw features. Most customers will tolerate a 1.5x latency hit for a 60s install vs a 4-hour Triton-on-Jetson setup."
@@ -472,14 +473,16 @@ goals:
     weight: 8
 
   - id: serve-pi05-prefix-cache-impl
-    description: "Build production Pi05PrefixCache class per reference/deep_dive_vllm_prefix_cache.md design. Episode-keyed (not request-keyed like vLLM), LRU eviction, hit-rate metric. Replaces the script-level phash hack. Lives in src/reflex/runtime/pi05_decomposed_server.py + new src/reflex/runtime/episode_cache.py. ~1-2 days work after fix-state-out-preprocessor + verify-lang-stability gates."
-    check: "test -f src/reflex/runtime/episode_cache.py && grep -q 'Pi05PrefixCache' src/reflex/runtime/pi05_decomposed_server.py 2>/dev/null"
-    weight: 10
+    status: done
+    description: "[DONE 2026-04-22 PM, but discovered to be wrong-shaped — see serve-episode-aware-cache for the failed eval.] Built EpisodeCache class in src/reflex/runtime/episode_cache.py + cache_level='episode' branch in Pi05DecomposedInference. Code is correct for stable-input use cases (latency microbench validated 8.95x speedup). NOT used as customer-facing default — see honest finding doc for why. Code retained for potential future reuse (e.g. action-chunk cache layer or stationary-robot scenarios)."
+    check: "test -f src/reflex/runtime/episode_cache.py && grep -q 'cache_level == .episode.' src/reflex/runtime/pi05_decomposed_server.py 2>/dev/null"
+    weight: 2
 
   - id: serve-cache-on-off-libero-real
-    description: "Re-run LIBERO cache-on vs cache-off after Pi05PrefixCache is built. The LOAD-BEARING measurement: cache-on success_rate ≥ cache-off proves the moat is real for production. If yes, ship the 5x serve speedup claim. If no, pivot to action-chunk caching. Depends on serve-fix-decomposed-libero-state-out-preprocessor + serve-pi05-prefix-cache-impl."
-    check: "grep -q 'cache_on.*libero.*v0.5\\|cache-on-real' reflex_context/03_experiments/2026-04-22-v0.5-retry-stage3-libero-result.md 2>/dev/null"
-    weight: 10
+    status: done
+    description: "[DONE 2026-04-22 PM — moat hypothesis FALSIFIED.] Ran LIBERO with cache=episode on v0.5 stage-3 student. 3 consecutive TASK 0 timeouts (vs 5/5 on cache=none) → killed. Cross-timestep cache breaks inference because past_kv encodes vision; image moves per frame; reuse = stale visual context. Honest finding: reflex_vault 03_experiments/2026-04-22-prefix-cache-moat-honest-finding.md. The 5x claim is dead. The 9x within-call decomposed cache is real and shipped (decomposed export). Pivot: build A2C2 + RTC + hot-reload + streaming on top of the 9x baseline."
+    check: "test -f reflex_context/03_experiments/2026-04-22-prefix-cache-moat-honest-finding.md 2>/dev/null"
+    weight: 2
 
   - id: serve-latency-microbench-cache
     description: "Measure VLM prefix forward time vs expert denoise forward time on the v0.5 student decomposed ONNX. Theoretical cache speedup = (vlm_time + expert_time) / expert_time. Target ≥3x (per design VLM is ~80%% of compute). Cheap (~\$1, 30 min Modal). Independent of cache-on/off LIBERO test — gives the upper-bound number for product positioning."
@@ -534,9 +537,9 @@ goals:
   # easily copy' — exactly what our wedge is about.
 
   - id: serve-a2c2-correction-head
-    description: "A2C2 plug-in correction head (arXiv 2509.23224). Small bolt-on network that corrects RTC overshoot/undershoot on high-latency deployments (Jetson is the canonical use case). No retraining of the base VLA — just train the correction head on deployment traces. Solves 'RTC on Jetson has poor reactivity because inference takes 40-80ms'. High leverage — a week of work for a meaningful Jetson-latency win. Ships as add-on to RTC wedge."
+    description: "A2C2 plug-in correction head (arXiv 2509.23224). Small bolt-on network that corrects RTC overshoot/undershoot on high-latency deployments (Jetson is the canonical use case). No retraining of the base VLA — just train the correction head on deployment traces. Solves 'RTC on Jetson has poor reactivity because inference takes 40-80ms'. PROMOTED to weight 10 (2026-04-22 PM) after cross-timestep cache moat falsified — A2C2 is now the #1 serve item. ~1 week of work, paper-grade win, no model retraining required. Ships as add-on to RTC wedge."
     check: "test -f src/reflex/kernels/a2c2_correction.py 2>/dev/null"
-    weight: 8
+    weight: 10
 
   - id: serve-reflex-optimize-command
     description: "`reflex optimize <model>` — bundle EfficientVLA (arXiv 2506.10100) + dKV-Cache (arXiv 2505.15781) + FlashVLA (arXiv 2505.21200) as one CLI command that transforms any VLA → 3-5x faster inference. This is the packaging opportunity: each paper alone is a research artifact, but bundling them behind a single CLI invocation is a product. Competitive moat because it requires VLA-specific knowledge (which layers to cache, which ops to fuse, which attention patterns to skip) that general servers don't have."
