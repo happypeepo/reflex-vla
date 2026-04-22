@@ -375,8 +375,8 @@ goals:
     weight: 8
 
   - id: distill-state-out-pi05-v0.5
-    status: in_progress
-    description: "v0.5 milestone: train a SnapFlow pi0.5 student that takes proprio state as an EXPLICIT input via a new state_proj layer, instead of pi0.5's default state-in-language tokenization. Goal: unlock the prefix KV cache in pi0.5 production (currently 0% hit rate because lang drifts every frame due to state-in-lang). Design: reflex_vault 01_architecture/distill_state_out_pi05_design.md. ADR: 01_decisions/2026-04-22-distill-state-out-pi05-student.md. Status 2026-04-22: student class scaffolding shipped (SnapFlowPI05StateOutPytorch + enable_snapflow_state_out). Remaining: (a) preprocessor override to strip state from lang_tokens at training+inference, (b) distill script wiring, (c) 10k-step distill run on Modal (~$15), (d) LIBERO eval + cache-on eval + latency microbench. Success gate: ≥95% LIBERO cache-off, ≥95% cache-on, ≥50% prefix cache hit rate in continuous manipulation, ≥7× per-query speedup."
+    status: failed
+    description: "v0.5 attempt FAILED 2026-04-22. Engineering integration succeeded end-to-end (FinetuneConfig.variant, snapflow_backend dispatch, Pi05PrepareTokenizerStateOutStep, decomposed export with state input, Pi05DecomposedInference state passthrough, LIBERO harness state plumbing). 10k SnapFlow distill ran cleanly. Decomposed export wrote 6 files. BUT the trained student fails LIBERO entirely — 4 consecutive timeouts on TASK 0 + TASK 1 cache-off. Root cause likely: additive-bias state injection (added to action_emb) is too weak vs pi0's prepend-as-token pattern; OR teacher targets unreachable from student input distribution; OR state_proj weights stayed too small. Full post-mortem: reflex_vault 03_experiments/2026-04-22-v0.5-stage-3-failure.md. Cost: ~\$10. Pivot path: either redesign with pi0-pattern prepend (with proper attention mask extension) OR pivot pitch (prefix cache is pi0-only; pi0.5 ships distill+FP16+decomposed without cache speedup claim)."
     check: "grep -q 'SnapFlowPI05StateOutPytorch' src/reflex/distill/snapflow_pi0_model.py 2>/dev/null"
     weight: 9
 
