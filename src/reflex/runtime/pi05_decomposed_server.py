@@ -244,6 +244,7 @@ class Pi05DecomposedInference:
         lang_tokens: np.ndarray,
         lang_masks: np.ndarray,
         noise: np.ndarray,
+        state: np.ndarray | None = None,
     ) -> np.ndarray:
         """Run one pi0.5 forward, returning ``actions`` of shape
         ``(B, chunk_size, action_dim)``.
@@ -289,6 +290,26 @@ class Pi05DecomposedInference:
         expert_feed = {name: past_kv[i] for i, name in enumerate(self._past_kv_names)}
         expert_feed["prefix_pad_masks"] = prefix_pad
         expert_feed["noise"] = noise.astype(np.float32, copy=False)
+        # v0.5 state-out: expert ONNX has a 'state' input. Pad to
+        # max_state_dim if caller passed a shorter vector.
+        if self.config.get("decomposed", {}).get("expert_takes_state"):
+            if state is None:
+                raise ValueError(
+                    "decomposed export was built with expert_takes_state=True; "
+                    "predict_action_chunk requires state=<np.ndarray>"
+                )
+            state_arr = state.astype(np.float32, copy=False)
+            # state_proj input dim is max_state_dim (32 for pi0.5)
+            expected_dim = next(
+                i.shape[-1] for i in self._sess_expert.get_inputs() if i.name == "state"
+            )
+            if isinstance(expected_dim, int) and state_arr.shape[-1] < expected_dim:
+                pad = np.zeros(
+                    state_arr.shape[:-1] + (expected_dim - state_arr.shape[-1],),
+                    dtype=state_arr.dtype,
+                )
+                state_arr = np.concatenate([state_arr, pad], axis=-1)
+            expert_feed["state"] = state_arr
 
         actions = self._sess_expert.run(["actions"], expert_feed)[0]
         if actions.dtype != np.float32:
