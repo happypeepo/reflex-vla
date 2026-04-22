@@ -653,16 +653,20 @@ def _resolve_snapflow_pi05_state_out_class() -> type:
         """v0.5 StateOut student. Inherits target_time machinery from
         SnapFlowPI05Pytorch; adds explicit state input via state_proj.
 
-        Design note (2026-04-22): first attempt was to prepend
-        ``state_proj(state)`` as a dedicated suffix token (pi0 pattern).
-        That breaks pi0.5's attention mask plumbing — the expert
-        attention expects a fixed suffix_len=chunk_size and raises
-        'attn_weights vs attention_mask dim mismatch' at the expert's
-        eager attention call. Revised approach below: ADD state_emb
-        to the existing action embeddings (broadcast over chunk dim)
-        so suffix shape stays (B, chunk_size, dim) — no mask impact.
-        The state signal still reaches the expert via action_time_emb
-        conditioning.
+        Design note (2026-04-22 v2): the additive-bias injection (v1)
+        gave the action expert a too-weak conditioning signal — the
+        student couldn't extract per-position state info from a broadcast
+        bias. SnapFlow self-distillation (Eq. 11) had no teacher term to
+        push state_proj to learn either, so the student converged to
+        "ignore state" and LIBERO eval was 0/4.
+
+        v2 reverts to pi0's PREPEND-AS-TOKEN pattern. Suffix is now
+        (B, chunk_size + 1, dim): state token at position 0, then 50
+        action tokens. Attention can selectively read state. Earlier
+        attempt at prepend hit attention-mask shape errors that turned
+        out to be from gradient_checkpointing forcing use_cache=False
+        (separate bug, fixed in commit 88cfe7b). With gc disabled the
+        prepend works.
         """
 
         def embed_suffix(  # type: ignore[override]
@@ -672,31 +676,36 @@ def _resolve_snapflow_pi05_state_out_class() -> type:
             target_time=None,
             state=None,
         ):
-            """Same suffix shape as parent but action embeddings carry
-            an additive state contribution via state_proj. State MUST
-            be provided."""
+            """Pi0 pattern: prepend state_proj(state) as a sequence
+            token at position 0 of the suffix. Suffix shape becomes
+            (B, chunk_size + 1, dim). State MUST be provided."""
             if state is None:
                 raise ValueError(
                     "SnapFlowPI05StateOutPytorch.embed_suffix requires state"
                 )
-            # Always match state_proj's weight dtype (bf16 during training,
-            # fp32 in some inference paths). Earlier code only handled the
-            # fp32-weights case, missing the common bf16-weights case.
             if state.dtype != self.state_proj.weight.dtype:
                 state = state.to(self.state_proj.weight.dtype)
 
-            # Run parent's embed_suffix unchanged — gets us the correct
-            # suffix shape + attention masks + adarms_cond.
-            embs, pad_masks, att_masks, adarms_cond = (
+            state_emb = self.state_proj(state)  # (B, dim)
+
+            # Run parent to get the chunk_size-length suffix (action_time_emb).
+            embs_no_state, pad_masks_no_state, att_masks_no_state, adarms_cond = (
                 super().embed_suffix(noisy_actions, timestep, target_time=target_time)
             )
 
-            # Inject state as an additive bias to the action embeddings.
-            # state_emb shape: (B, dim). Broadcast-add over the chunk
-            # dimension without changing suffix_len.
-            state_emb = self.state_proj(state)  # (B, dim)
-            state_emb = state_emb.to(embs.dtype)
-            embs = embs + state_emb[:, None, :]
+            bsize = state_emb.shape[0]
+            device = state_emb.device
+
+            # Prepend state as token 0 of the suffix.
+            state_token = state_emb[:, None, :].to(embs_no_state.dtype)  # (B, 1, dim)
+            state_pad_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
+            state_att_flag = torch.ones(
+                bsize, 1, dtype=att_masks_no_state.dtype, device=device,
+            )
+
+            embs = torch.cat([state_token, embs_no_state], dim=1)
+            pad_masks = torch.cat([state_pad_mask, pad_masks_no_state], dim=1)
+            att_masks = torch.cat([state_att_flag, att_masks_no_state], dim=1)
 
             return embs, pad_masks, att_masks, adarms_cond
 
@@ -813,20 +822,31 @@ def _resolve_snapflow_pi05_state_out_class() -> type:
     return SnapFlowPI05StateOutPytorch
 
 
-def enable_snapflow_state_out(model: Any, state_dim: int | None = None) -> None:
+def enable_snapflow_state_out(
+    model: Any,
+    state_dim: int | None = None,
+    warm_init_from_pi0: str | None = None,
+) -> None:
     """Add target_time_embed_mlp + state_proj and swap to the StateOut class.
 
-    Mirrors ``enable_snapflow`` but for pi0.5 only, with one extra step:
-    registers ``state_proj`` = Linear(state_dim → expert_hidden_dim),
-    initialized with small normal weights so the student can
-    immediately learn to use state (unlike target_time_embed_mlp which
-    starts zero — state_proj needs nonzero init or it's stuck ignoring
-    state).
+    Mirrors ``enable_snapflow`` but for pi0.5 only, with two extra steps:
+    1. Registers ``state_proj`` = Linear(state_dim → expert_hidden_dim).
+    2. Optionally warm-initializes state_proj weights from a pretrained
+       pi0 checkpoint (matches the pi0 architecture's known-working
+       state encoding instead of small-random init).
 
     Args:
         model: PI05Pytorch instance.
-        state_dim: proprio state dimension. If None, read from
-            ``model.config.max_state_dim`` (pi0.5 convention).
+        state_dim: proprio state dim. Defaults to model.config.max_state_dim.
+        warm_init_from_pi0: HF repo id of a pi0 checkpoint to copy
+            state_proj.weight + bias from. Pi0 and pi0.5 share PaliGemma
+            backbone width (1024), so the Linear(32, 1024) weights are
+            shape-compatible. Setting this avoids the gradient-bootstrap
+            problem (state_proj starts at known-good values trained on
+            real robot state, not 0.02-std noise).
+
+            Recommended: 'lerobot/pi0_libero_finetuned_v044' for LIBERO,
+            'lerobot/pi0_base' for general.
     """
     import torch
     import torch.nn as nn
@@ -840,7 +860,8 @@ def enable_snapflow_state_out(model: Any, state_dim: int | None = None) -> None:
     # Step 1: install target_time_embed_mlp + swap to SnapFlowPI05Pytorch.
     enable_snapflow(model)
 
-    # Step 2: add state_proj (small-nonzero init).
+    # Step 2: add state_proj. Default init = small-normal; if warm_init_from_pi0
+    # is set, replace with weights from that pi0 checkpoint.
     state_dim = state_dim or getattr(model.config, "max_state_dim", None)
     if state_dim is None:
         raise ValueError(
@@ -848,11 +869,53 @@ def enable_snapflow_state_out(model: Any, state_dim: int | None = None) -> None:
         )
     expert_hidden = model.action_in_proj.out_features
     state_proj = nn.Linear(state_dim, expert_hidden)
-    # Small-scale init: keeps student close to parent initially, but not
-    # zero (which would have the student ignore state entirely).
     with torch.no_grad():
         state_proj.weight.normal_(mean=0.0, std=0.02)
         state_proj.bias.zero_()
+
+    if warm_init_from_pi0:
+        try:
+            from huggingface_hub import snapshot_download
+            import safetensors.torch as st
+            from pathlib import Path
+            pi0_dir = snapshot_download(warm_init_from_pi0)
+            sf_path = Path(pi0_dir) / "model.safetensors"
+            tensors = st.load_file(str(sf_path))
+            # lerobot pi0 saves state_proj as model.state_proj.{weight,bias}
+            w_key = "model.state_proj.weight"
+            b_key = "model.state_proj.bias"
+            if w_key in tensors and b_key in tensors:
+                w = tensors[w_key]
+                b = tensors[b_key]
+                if w.shape == state_proj.weight.shape and b.shape == state_proj.bias.shape:
+                    with torch.no_grad():
+                        state_proj.weight.copy_(w)
+                        state_proj.bias.copy_(b)
+                    logger.info(
+                        "[snapflow-state-out] warm-initialized state_proj from %s "
+                        "(weight norm: %.4f, vs small-init norm: %.4f)",
+                        warm_init_from_pi0,
+                        float(state_proj.weight.norm()),
+                        float(state_dim) ** 0.5 * 0.02,
+                    )
+                else:
+                    logger.warning(
+                        "[snapflow-state-out] warm_init shape mismatch (pi0 %s vs pi0.5 %s); "
+                        "using small-random init instead",
+                        tuple(w.shape), tuple(state_proj.weight.shape),
+                    )
+            else:
+                logger.warning(
+                    "[snapflow-state-out] state_proj.weight not found in %s "
+                    "(keys: %d); using small-random init",
+                    warm_init_from_pi0, len(tensors),
+                )
+        except Exception as e:
+            logger.warning(
+                "[snapflow-state-out] warm_init failed (%s); using small-random init",
+                e,
+            )
+
     ref_param = next(model.parameters())
     state_proj = state_proj.to(dtype=ref_param.dtype, device=ref_param.device)
     model.add_module("state_proj", state_proj)
@@ -861,8 +924,8 @@ def enable_snapflow_state_out(model: Any, state_dim: int | None = None) -> None:
     state_out_cls = _resolve_snapflow_pi05_state_out_class()
     model.__class__ = state_out_cls
     logger.info(
-        "[snapflow-state-out] enabled on pi05 (state_dim=%d, expert_hidden=%d)",
-        state_dim, expert_hidden,
+        "[snapflow-state-out] enabled on pi05 (state_dim=%d, expert_hidden=%d, warm_init=%s)",
+        state_dim, expert_hidden, warm_init_from_pi0 or "small-random",
     )
 
 

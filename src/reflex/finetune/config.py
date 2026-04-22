@@ -98,6 +98,34 @@ class FinetuneConfig:
         to the student + swaps the preprocessor step.
     See reflex_vault 01_architecture/distill_state_out_pi05_design.md."""
 
+    loss_mode: str = "snapflow"
+    """Distillation loss formulation. v0.5 retry adds 'teacher_supervised'.
+    Values:
+      - 'snapflow' (default): self-distillation consistency loss
+        (Eq. 11 of arxiv 2604.05656). Teacher is NOT in the loss; the
+        student is initialized from teacher weights and the loss enforces
+        self-consistency across the velocity field. Works for v0.3.1
+        (same architecture, same input modality).
+      - 'teacher_supervised': L2(v_student, v_teacher) at random t.
+        Teacher actually IN the loss. Required for v0.5 cross-modality
+        distillation (state-in-lang teacher → state-out student) where
+        SnapFlow's self-consistency converges to the degenerate "ignore
+        state" fixed point.
+    See reflex_vault 03_experiments/2026-04-22-v0.5-retry-plan-pmcd.md."""
+
+    warm_init_state_proj_from: str = ""
+    """Optional HF repo id to warm-init state_proj weights from. Only
+    applies when variant='state_out'. Recommended:
+    'lerobot/pi0_libero_finetuned_v044' for LIBERO. Empty string =
+    small-random init (fallback)."""
+
+    state_sensitivity_alpha: float = 0.0
+    """Weight for the state-sensitivity penalty term (only applies
+    when loss_mode='teacher_supervised'). 0 disables. Recommended:
+    0.1 for early training to push student off the 'ignore state'
+    fixed point, then 0 for fine-tuning. Currently constant
+    throughout training; curriculum schedule TBD."""
+
     def __post_init__(self) -> None:
         self.output = Path(self.output)
 

@@ -156,12 +156,19 @@ class SnapFlowBackend:
                 # Student: state-out variant. enable_snapflow_state_out internally
                 # calls enable_snapflow first (adds target_time_embed_mlp) then
                 # registers state_proj + swaps to SnapFlowPI05StateOutPytorch.
-                enable_snapflow_state_out(student.model)
+                warm_init_repo = getattr(cfg, "warm_init_state_proj_from", "") or None
+                enable_snapflow_state_out(
+                    student.model, warm_init_from_pi0=warm_init_repo,
+                )
                 logger.info(
                     "[snapflow] student uses STATE-OUT variant — will receive "
                     "proprio state via state_proj, not lang tokens. "
                     "Teacher stays on default (state-in-lang) preprocessor path."
                 )
+                if warm_init_repo:
+                    logger.info(
+                        "[snapflow] state_proj warm-init from %s", warm_init_repo,
+                    )
             elif variant == "state_out":
                 return CheckpointResult(
                     final_checkpoint_path=Path(cfg.output),
@@ -274,6 +281,8 @@ class SnapFlowBackend:
             max_action_dim = getattr(teacher.config, "max_action_dim", None)
             chunk_size = getattr(teacher.config, "chunk_size", None)
             variant = getattr(cfg, "variant", "default")
+            loss_mode = getattr(cfg, "loss_mode", "snapflow")
+            sensitivity_alpha = getattr(cfg, "state_sensitivity_alpha", 0.0)
             for step, batch in enumerate(loader, start=1):
                 # Apply lerobot's preprocessor pipeline: rename_map (image keys),
                 # tokenizer (task -> language_tokens), device transfer, normalize.
@@ -308,16 +317,29 @@ class SnapFlowBackend:
                     teacher_obs_kwargs = None
 
                 opt.zero_grad()
-                loss, snap = snapflow_loss_step(
-                    student_velocity_fn,
-                    teacher_velocity_fn,
-                    action=action,
-                    noise=noise,
-                    t=t,
-                    obs_kwargs=obs_kwargs,
-                    teacher_obs_kwargs=teacher_obs_kwargs,
-                    consistency_alpha=consistency_alpha,
-                )
+                if loss_mode == "teacher_supervised":
+                    from reflex.distill.snapflow import teacher_supervised_loss_step
+                    loss, snap = teacher_supervised_loss_step(
+                        student_velocity_fn,
+                        teacher_velocity_fn,
+                        action=action,
+                        noise=noise,
+                        t=t,
+                        obs_kwargs=obs_kwargs,
+                        teacher_obs_kwargs=teacher_obs_kwargs,
+                        state_sensitivity_alpha=sensitivity_alpha,
+                    )
+                else:
+                    loss, snap = snapflow_loss_step(
+                        student_velocity_fn,
+                        teacher_velocity_fn,
+                        action=action,
+                        noise=noise,
+                        t=t,
+                        obs_kwargs=obs_kwargs,
+                        teacher_obs_kwargs=teacher_obs_kwargs,
+                        consistency_alpha=consistency_alpha,
+                    )
                 loss.backward()
                 opt.step()
 

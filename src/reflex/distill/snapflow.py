@@ -190,6 +190,102 @@ def snapflow_loss_step(
     return total, snapshot
 
 
+def teacher_supervised_loss_step(
+    student_velocity_fn: Callable[..., "torch.Tensor"],
+    teacher_velocity_fn: Callable[..., "torch.Tensor"],
+    *,
+    action: "torch.Tensor",
+    noise: "torch.Tensor",
+    t: "torch.Tensor",
+    obs_kwargs: dict,
+    teacher_obs_kwargs: dict | None = None,
+    state_sensitivity_alpha: float = 0.0,
+) -> tuple["torch.Tensor", SnapFlowLosses]:
+    """Teacher-supervised distillation loss for v0.5 cross-modality work.
+
+    Unlike ``snapflow_loss_step`` (which is self-distillation — both
+    targets come from the student), this loss compares student velocity
+    against TEACHER velocity at the same interpolation point. Required
+    when the student has a different input modality than the teacher
+    (state-out student vs state-in-lang teacher) so the teacher's
+    behavior is actually IN the loss.
+
+    Loss = L2(v_student, v_teacher) + state_sensitivity_alpha * sensitivity_term.
+
+    The optional state-sensitivity term penalizes students that ignore
+    state: it samples two random states for the same image+lang batch
+    and pushes their predictions APART. Forces the student off the
+    "ignore state" fixed point that's common in the early phase of
+    training when state_proj output is small.
+
+    Args:
+      student_velocity_fn: callable (x, t, target_time=None, **obs_kwargs) -> v.
+        For v0.5 the student also reads `state` from obs_kwargs.
+      teacher_velocity_fn: callable (x, t, **obs_kwargs) -> v (frozen).
+      action: ground-truth action chunk (B, chunk, action_dim). Used only
+        for x_t interpolation.
+      noise: Gaussian noise, same shape as action.
+      t: random time per sample (B,), sampled Uniform(0, 1).
+      obs_kwargs: STUDENT conditioning (state-stripped lang + state vec).
+      teacher_obs_kwargs: TEACHER conditioning (state-in-lang). Required.
+      state_sensitivity_alpha: weight for the state-sensitivity penalty.
+        0 disables it. Recommended: 0.1 for first 1-2k steps, then 0.
+
+    Returns (loss, SnapFlowLosses snapshot). Caller does .backward().
+    """
+    import torch
+    import torch.nn.functional as F
+
+    if teacher_obs_kwargs is None:
+        raise ValueError(
+            "teacher_supervised_loss_step requires teacher_obs_kwargs "
+            "(teacher and student have different input modalities)"
+        )
+
+    # x_t = (1 - t) * noise + t * action — standard flow-matching
+    # interpolation. Teacher and student see the same x_t.
+    x_t, _ = flow_matching_interp(noise, action, t)
+
+    # Teacher: no grad, state-in-lang inputs
+    with torch.no_grad():
+        v_teacher = teacher_velocity_fn(x_t, t, **teacher_obs_kwargs)
+
+    # Student: grad, state-stripped lang + explicit state
+    v_student = student_velocity_fn(x_t, t, target_time=None, **obs_kwargs)
+
+    # Primary supervision: match teacher's velocity
+    fm_loss = F.mse_loss(v_student, v_teacher)
+    total = fm_loss
+
+    # Optional state-sensitivity penalty (curriculum)
+    sensitivity_loss_val = 0.0
+    if state_sensitivity_alpha > 0:
+        from lerobot.utils.constants import OBS_STATE
+        if OBS_STATE in obs_kwargs:
+            obs_b = dict(obs_kwargs)
+            shuffled_state = obs_kwargs[OBS_STATE].clone()
+            # Shuffle state across batch so each sample gets a different state
+            B = shuffled_state.shape[0]
+            if B > 1:
+                shuffled_state = shuffled_state[torch.randperm(B)]
+            else:
+                # Single-sample batch — perturb instead
+                shuffled_state = shuffled_state + torch.randn_like(shuffled_state) * 0.5
+            obs_b[OBS_STATE] = shuffled_state
+            v_student_alt = student_velocity_fn(x_t, t, target_time=None, **obs_b)
+            # Negative L2 — push outputs apart for different states
+            sensitivity_loss = -F.mse_loss(v_student_alt, v_student.detach())
+            total = total + state_sensitivity_alpha * sensitivity_loss
+            sensitivity_loss_val = float(sensitivity_loss.item())
+
+    snapshot = SnapFlowLosses(
+        flow_matching=float(fm_loss.item()),
+        consistency=sensitivity_loss_val,  # repurposed slot for sensitivity penalty
+        total=float(total.item()),
+    )
+    return total, snapshot
+
+
 class ZeroInitTargetTimeEmbedding:
     """The "zero-init target_time" trick from SnapFlow.
 
@@ -299,5 +395,6 @@ __all__ = [
     "flow_matching_interp",
     "sinusoidal_time_embedding",
     "snapflow_loss_step",
+    "teacher_supervised_loss_step",
     "two_step_euler_shortcut",
 ]

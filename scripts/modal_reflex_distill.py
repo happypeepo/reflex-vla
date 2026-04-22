@@ -141,6 +141,9 @@ def distill_modal(
     skip_export: bool = False,
     image_key_map_json: str = "",
     variant: str = "default",
+    loss_mode: str = "snapflow",
+    warm_init_state_proj_from: str = "",
+    state_sensitivity_alpha: float = 0.0,
 ):
     """Run reflex.finetune.run_finetune(phase='distill') on Modal.
 
@@ -187,6 +190,9 @@ def distill_modal(
         teacher_export=teacher_export,
         distillation_method="snapflow",
         variant=variant,
+        loss_mode=loss_mode,
+        warm_init_state_proj_from=warm_init_state_proj_from,
+        state_sensitivity_alpha=state_sensitivity_alpha,
         extra_lerobot_args=extra_args,
     )
 
@@ -235,6 +241,9 @@ def main(
     skip_export: bool = False,
     image_key_map_json: str = "",
     variant: str = "default",
+    loss_mode: str = "snapflow",
+    warm_init_state_proj_from: str = "",
+    state_sensitivity_alpha: float = 0.0,
 ):
     print(f"[reflex distill on Modal — SnapFlow]")
     print(f"  teacher: {teacher_export}")
@@ -244,6 +253,12 @@ def main(
           f"alpha={consistency_alpha}")
     if variant != "default":
         print(f"  variant: {variant}")
+    if loss_mode != "snapflow":
+        print(f"  loss_mode: {loss_mode}")
+    if warm_init_state_proj_from:
+        print(f"  warm_init_state_proj_from: {warm_init_state_proj_from}")
+    if state_sensitivity_alpha > 0:
+        print(f"  state_sensitivity_alpha: {state_sensitivity_alpha}")
     if skip_libero_gate:
         print(f"  libero gate: DISABLED")
     else:
@@ -263,6 +278,9 @@ def main(
         skip_export=skip_export,
         image_key_map_json=image_key_map_json,
         variant=variant,
+        loss_mode=loss_mode,
+        warm_init_state_proj_from=warm_init_state_proj_from,
+        state_sensitivity_alpha=state_sensitivity_alpha,
     )
     print("\n=== RESULT ===")
     for k, v in r.items():
