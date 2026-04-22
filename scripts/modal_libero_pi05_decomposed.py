@@ -288,12 +288,21 @@ def run_decomposed_libero(
     # ─── Load decomposed ONNX inference ──────────────────────────────
     from reflex.runtime.pi05_decomposed_server import Pi05DecomposedInference
     # Map CLI cache_mode to class params:
-    #   none   → enable_cache=False
-    #   phash  → enable_cache=True, cache_level='prefix' (VLM-skip on hit)
-    #   action → enable_cache=True, cache_level='action' (full-forward skip on hit)
-    #            + cache_ignore_lang=True (pi0.5 state-in-lang needs this)
-    _enable_cache = cache_mode in ("phash", "action")
-    _cache_level = "action" if cache_mode == "action" else "prefix"
+    #   none    → enable_cache=False
+    #   phash   → enable_cache=True, cache_level='prefix' (VLM-skip on hit)
+    #   action  → enable_cache=True, cache_level='action' (full-forward skip)
+    #             + cache_ignore_lang=True (pi0.5 state-in-lang needs this)
+    #   episode → enable_cache=True, cache_level='episode' (lang-only cache,
+    #             image ignored) — THE MOAT for v0.5 state-out pi0.5
+    _enable_cache = cache_mode in ("phash", "action", "episode")
+    if cache_mode == "action":
+        _cache_level = "action"
+    elif cache_mode == "episode":
+        _cache_level = "episode"
+    elif cache_mode == "phash":
+        _cache_level = "prefix"
+    else:
+        _cache_level = "prefix"  # dummy; enable_cache=False
     _ignore_lang = cache_mode == "action"
     inference = Pi05DecomposedInference(
         export_dir=decomposed_dir,
@@ -448,6 +457,9 @@ def run_decomposed_libero(
                                 # it for state-out exports (auto-detects from
                                 # reflex_config.json's expert_takes_state flag).
                                 state_np = batch_pp[OBS_STATE].cpu().numpy() if OBS_STATE in batch_pp else None
+                                # Episode id stable within one LIBERO episode
+                                # → lang-only cache hits after the first frame.
+                                _episode_id = f"t{task_idx}_ep{ep}"
                                 chunk_np = inference.predict_action_chunk(
                                     img_base=images[0].cpu().numpy(),
                                     img_wrist_l=images[1].cpu().numpy(),
@@ -459,6 +471,7 @@ def run_decomposed_libero(
                                     lang_masks=lang_masks.cpu().numpy(),
                                     noise=noise.cpu().numpy(),
                                     state=state_np,
+                                    episode_id=_episode_id,
                                 )
                                 chunk = torch.from_numpy(chunk_np).to(images[0].device)
                                 # Trim padded max_action_dim → real env action dim
@@ -561,8 +574,8 @@ def main(
         task_list = None
     else:
         task_list = [int(t) for t in tasks.split(",")]
-    if cache not in {"none", "phash", "action"}:
-        raise ValueError(f"--cache must be 'none'|'phash'|'action', got {cache!r}")
+    if cache not in {"none", "phash", "action", "episode"}:
+        raise ValueError(f"--cache must be 'none'|'phash'|'action'|'episode', got {cache!r}")
 
     print(f"Running decomposed LIBERO {suite}: cache={cache}, "
           f"tasks={task_list or 'all'}, {num_episodes} eps each")
