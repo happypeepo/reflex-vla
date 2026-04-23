@@ -1173,6 +1173,69 @@ def ros2_serve(
 
 
 @app.command()
+def replay(
+    trace_file: str = typer.Argument(help="Path to recorded JSONL trace (.jsonl or .jsonl.gz)"),
+    model: str = typer.Option(
+        "",
+        "--model",
+        help="Path to target export dir for replay. Required unless --no-replay.",
+    ),
+    diff: str = typer.Option(
+        "actions",
+        "--diff",
+        help="Diff mode (Day 2 ships actions only; latency/cache/all in Day 3).",
+    ),
+    n: int = typer.Option(
+        0,
+        "--n",
+        help="Replay first N records only. 0 = all.",
+    ),
+    output: str = typer.Option(
+        "",
+        "--output",
+        help="Write machine-readable diff report to this JSON path.",
+    ),
+    fail_on: str = typer.Option(
+        "",
+        "--fail-on",
+        help="Exit non-zero if any diff of this type fails (e.g. --fail-on actions).",
+    ),
+    no_replay: bool = typer.Option(
+        False,
+        "--no-replay",
+        help="Parse the trace + print header/counts without loading the model. "
+             "Useful for inspecting traces and validating their schema.",
+    ),
+):
+    """Replay a recorded /act trace against a target model.
+
+    Day 2 scope: load JSONL, replay each request, compute per-record actions
+    diff (cosine + max_abs). Latency / cache / guard diff modes land Day 3.
+
+    Trace format: TECHNICAL_PLAN §D.1 (schema v1).
+    """
+    from reflex.replay.cli import run_replay
+
+    if not no_replay and not model:
+        console.print(
+            "[red]--model is required (or pass --no-replay to inspect the trace "
+            "without loading a model).[/red]"
+        )
+        raise typer.Exit(1)
+    code = run_replay(
+        trace_file,
+        model or None,
+        diff_mode=diff,
+        n=n,
+        output_json=output,
+        fail_on=fail_on,
+        no_replay=no_replay,
+    )
+    if code != 0:
+        raise typer.Exit(code)
+
+
+@app.command()
 def targets():
     """List supported hardware targets."""
     table = Table(title="Supported Hardware Targets")
