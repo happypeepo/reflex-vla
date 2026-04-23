@@ -861,6 +861,29 @@ def serve(
         help="Execute frequency in Hz — the rate at which the robot pops "
              "an action from the buffer. Only used when --replan-hz > 0.",
     ),
+    record: str = typer.Option(
+        "",
+        help="If set, write every /act request+response to a JSONL trace in "
+             "this directory. One file per server session, named "
+             "<YYYYMMDD-HHMMSS>-<model_hash>-<session_id>.jsonl[.gz]. "
+             "Replay with `reflex replay <file> --model <export>`. See "
+             "TECHNICAL_PLAN §D.1 for the schema.",
+    ),
+    record_images: str = typer.Option(
+        "hash_only",
+        "--record-images",
+        help="Image redaction policy when --record is set: "
+             "'full' (~40MB/1k calls gzipped, base64 JPEG kept) | "
+             "'hash_only' (~0.9MB/1k calls, image_sha256 only — default; "
+             "sufficient for replay against a fixed image corpus) | "
+             "'none' (drop image entirely; minimal size).",
+    ),
+    record_no_gzip: bool = typer.Option(
+        False,
+        "--record-no-gzip",
+        help="When --record is set, write plain .jsonl instead of .jsonl.gz. "
+             "Useful for quick grep during dev; production should keep gzip on.",
+    ),
     embodiment: str = typer.Option(
         "",
         help="Per-embodiment config preset name (franka, so100, ur5, etc.). "
@@ -1019,6 +1042,11 @@ def serve(
         composed.append(f"[cyan]batch[/cyan]={max_batch}@{batch_timeout_ms:.0f}ms")
     if embodiment_cfg is not None:
         composed.append(f"[cyan]embodiment[/cyan]={embodiment_cfg.embodiment}")
+    if record:
+        composed.append(
+            f"[cyan]record[/cyan]={record} ({record_images}"
+            f"{', no-gzip' if record_no_gzip else ''})"
+        )
     if composed:
         console.print(f"  Wedges:  {' · '.join(composed)}")
 
@@ -1069,6 +1097,9 @@ def serve(
         replan_hz=replan_hz if replan_hz > 0 else None,
         execute_hz=execute_hz if execute_hz > 0 else None,
         embodiment_config=embodiment_cfg,
+        record_dir=record or None,
+        record_image_redaction=record_images,
+        record_gzip=not record_no_gzip,
     )
     if api_key:
         composed.append("[cyan]api-key-auth[/cyan]")

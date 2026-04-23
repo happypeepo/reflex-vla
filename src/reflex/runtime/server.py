@@ -31,10 +31,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .record import (
+    RecordWriter,
+    compute_config_hash,
+    compute_model_hash,
+)
 from .tracing import get_tracer, setup_tracing, shutdown_tracing
 
 logger = logging.getLogger(__name__)
 _tracer = get_tracer(__name__)
+
+try:
+    from reflex import __version__ as _REFLEX_VERSION
+except ImportError:
+    _REFLEX_VERSION = ""
 
 
 class ReflexServer:
@@ -1000,6 +1010,9 @@ def create_app(
     replan_hz: float | None = None,
     execute_hz: float | None = None,
     embodiment_config: Any = None,
+    record_dir: str | Path | None = None,
+    record_image_redaction: str = "hash_only",
+    record_gzip: bool = True,
 ) -> Any:
     """Create a FastAPI app for serving VLA predictions.
 
@@ -1100,6 +1113,39 @@ def create_app(
     # getattr(server, 'embodiment_config', None).
     server.embodiment_config = embodiment_config
 
+    # Attach JSONL recorder (B.2) if --record was passed. Lazily emits the
+    # header on the first /act call. Coexists with OTel tracing — see
+    # reflex_context/03_experiments/2026-04-23-phoenix-record-replay-smoke.md.
+    server._recorder = None  # type: ignore[attr-defined]
+    if record_dir is not None:
+        try:
+            _model_type = _monolithic_cfg.get("model_type", "smolvla")
+            _export_kind = _monolithic_cfg.get("export_kind", "decomposed")
+            _ec = embodiment_config
+            server._recorder = RecordWriter(  # type: ignore[attr-defined]
+                record_dir=record_dir,
+                model_hash=compute_model_hash(export_dir),
+                config_hash=compute_config_hash(export_dir),
+                export_dir=export_dir,
+                model_type=_model_type,
+                export_kind=_export_kind,
+                providers=providers or [],
+                gpu="",  # filled by hardware probe in v2
+                cuda_version="",
+                ort_version="",
+                embodiment=getattr(_ec, "embodiment", None) if _ec else None,
+                image_redaction=record_image_redaction,  # type: ignore[arg-type]
+                gzip_output=record_gzip,
+                reflex_version=_REFLEX_VERSION,
+            )
+            logger.info(
+                "RecordWriter armed: dir=%s redaction=%s gzip=%s",
+                record_dir, record_image_redaction, record_gzip,
+            )
+        except Exception as e:  # noqa: BLE001 — recorder must never crash serve startup
+            logger.error("RecordWriter init failed (recording disabled): %s", e)
+            server._recorder = None  # type: ignore[attr-defined]
+
     @asynccontextmanager
     async def lifespan(app):
         # Initialize OTel tracing if [tracing] extra is installed AND
@@ -1150,6 +1196,13 @@ def create_app(
             yield
         finally:
             await server.stop_batch_worker()
+            # Flush + close JSONL recorder if armed
+            _rec = getattr(server, "_recorder", None)
+            if _rec is not None:
+                try:
+                    _rec.write_footer({"total_requests": _rec.seq})
+                finally:
+                    _rec.close()
             shutdown_tracing()
 
     app = FastAPI(
@@ -1223,6 +1276,36 @@ def create_app(
                     )
                 if "error" in result:
                     span.set_attribute("error.type", str(result.get("error", ""))[:200])
+
+            # JSONL record hook (B.2). Writes inside the OTel span context
+            # so the seq attribute below cross-links the two ledgers. Recorder
+            # absent or degraded → no-op.
+            _rec = getattr(server, "_recorder", None)
+            if _rec is not None and isinstance(result, dict):
+                actions = result.get("actions") or []
+                action_dim = (
+                    len(actions[0]) if actions and isinstance(actions[0], list) else 0
+                )
+                latency_total = float(result.get("latency_ms", 0.0))
+                err = (
+                    {"slug": "inference-error", "message": str(result["error"])[:500]}
+                    if "error" in result
+                    else None
+                )
+                rec_seq = _rec.write_request(
+                    chunk_id=_rec.seq,  # 1:1 with seq for non-batched serve
+                    image_b64=request.image,
+                    instruction=request.instruction,
+                    state=request.state,
+                    actions=actions,
+                    action_dim=action_dim,
+                    latency_total_ms=latency_total,
+                    mode=str(result.get("inference_mode", "")),
+                    error=err,
+                )
+                if rec_seq >= 0:
+                    span.set_attribute("reflex.record.seq", rec_seq)
+
             return JSONResponse(content=result)
 
     @app.get("/config")
