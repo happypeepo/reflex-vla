@@ -205,9 +205,9 @@ goals:
     weight: 4
 
   - id: sqlite-audit-log
-    description: "reflex serve --audit-db appends every /act call to a SHA-256 hash-chain SQLite log"
+    description: "reflex serve --audit-db appends every /act call to a SHA-256 hash-chain SQLite log. RAISED weight 3 -> 8 (2026-04-23) per metrics gap audit — audit log is trust infrastructure (regulated industries unlock + customer compliance), not low-priority code. Long-term enterprise moat per wedge_priority_ranking guard wedge."
     check: "test -f src/reflex/safety/audit_log.py && .venv/bin/python -c 'from reflex.safety.audit_log import AuditLog' 2>/dev/null"
-    weight: 3
+    weight: 8
 
   # ── LAUNCH VERIFICATION (durable pre-launch + regression gates) ───
 
@@ -629,6 +629,42 @@ goals:
     weight: 9
 
   - id: serve-cloud-latency-matrix
-    description: "Measure per-stage latency (VLM prefix / expert denoise / postprocess) across A10G + A100-80GB + H100 with p50/p95/p99 on pi0.5 decomposed + SmolVLA + pi0 FP16 + GR00T monolithic. Validates the projected-from-A10G scaling assumptions in serve_technical_plan_v3.md Appendix A BEFORE any Jetson measurements land. Writes per-hardware YAML to baselines/<hw>/<model>/<precision>.yaml per Appendix D.3 schema. 1-2 hr Modal + ~\\$5. Unblocks the `reflex bench` comparison feature and validates/invalidates the 'FA3 is 0% on ONNX serve path' claim flagged as `[unverified]` in Appendix A."
-    check: "test -f reflex_context/06_experiments/cloud_latency_matrix.md 2>/dev/null && grep -q 'p50\\|p95' reflex_context/06_experiments/cloud_latency_matrix.md 2>/dev/null"
+    description: "Measure per-stage latency (VLM prefix / expert denoise / postprocess) across A10G + A100-80GB + H100 with p50/p95/p99 on pi0.5 decomposed + SmolVLA + pi0 FP16 + GR00T monolithic. Validates the projected-from-A10G scaling assumptions in serve_technical_plan_v3.md Appendix A BEFORE any Jetson measurements land. Writes per-hardware YAML to baselines/<hw>/<model>/<precision>.yaml per Appendix D.3 schema. 1-2 hr Modal + ~\\$5. Unblocks the `reflex bench` comparison feature and validates/invalidates the 'FA3 is 0% on ONNX serve path' claim flagged as `[unverified]` in Appendix A. RAISED weight 6 -> 8 (2026-04-23) per metrics gap audit — performance metrics should be w8-9, paired with jetson-latency-published w10."
+    check: "test -f reflex_context/03_experiments/cloud_latency_matrix.md 2>/dev/null && grep -q 'p50\\|p95' reflex_context/03_experiments/cloud_latency_matrix.md 2>/dev/null"
+    weight: 8
+
+  # ── METRICS GAP AUDIT ADDITIONS (added 2026-04-23) ──
+  # Surfaced by /tmp/serve_metrics_gap_audit.md — these 6 goals were
+  # implied by features/01_serve/METRICS.md but not previously tracked
+  # in GOALS.yaml. Adding so the source-of-truth covers reliability +
+  # adoption metrics, not just innovation/moats.
+
+  - id: serve-uptime-99-9
+    description: "reflex serve uptime ≥ 99.9% over rolling 30 days, validated via Prometheus alerts. SLA claim load-bearing for enterprise customers. Pairs with Phase 0.5 prewarm + crash-recovery."
+    check: "grep -q 'reflex_server_up' src/reflex/runtime/metrics.py 2>/dev/null"
+    weight: 10
+
+  - id: serve-slo-enforcement
+    description: "reflex serve --slo p99=Xms rejects requests exceeding user-set latency threshold; returns 503 SLO_VIOLATED with structured error. Reliability §3 metric in METRICS.md. Bet-your-business credibility for Pro tier."
+    check: "grep -q 'slo.*enforcement\\|SloViolated\\|--slo' src/reflex/runtime/server.py 2>/dev/null"
+    weight: 9
+
+  - id: serve-mttr-under-1hr
+    description: "Mean time to RCA for reported bugs < 1 hour, tracked via GitHub issue timestamps (open → root-cause label). Customer trust depends on fast debugging. Correlates with serve-record-replay (w9) which makes physical-robot bugs reproducible off-robot."
+    check: "test -f scripts/compute_mttr.py 2>/dev/null"
+    weight: 8
+
+  - id: differentiation-time-to-first-act
+    description: "Fresh user can go pip install → first /act response in ≤ 15 minutes (timed dogfood walkthrough). Currently UNTESTED but claimed in monitors.yaml. Customer-facing differentiator; must validate before claiming publicly."
+    check: "ls reflex_context/03_experiments/time_to_first_act_walkthrough_*.md 2>/dev/null | head -1"
+    weight: 8
+
+  - id: adoption-github-stars-500
+    description: "GitHub stars on rylinjames/reflex-vla trending toward 500 (Phase 1 KPI at 6mo per north_star.md). Adoption proxy. Lightweight GitHub API check; could be automated weekly."
+    check: "true  # external metric; no local check"
     weight: 6
+
+  - id: adoption-pro-subs-phase1
+    description: "Pro subscriptions ($99/mo) ≥ 3 active recurring by end of Phase 1 (6 mo per north_star.md). Revenue signal validating willingness-to-pay — the earliest hard inflection per north_star.md. Requires Stripe integration first."
+    check: "true  # requires Stripe integration; placeholder check"
+    weight: 8
