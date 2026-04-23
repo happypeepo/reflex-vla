@@ -999,6 +999,7 @@ def create_app(
     api_key: str | None = None,
     replan_hz: float | None = None,
     execute_hz: float | None = None,
+    embodiment_config: Any = None,
 ) -> Any:
     """Create a FastAPI app for serving VLA predictions.
 
@@ -1006,6 +1007,13 @@ def create_app(
     matching ``X-Reflex-Key`` header or it's rejected with HTTP 401. None
     means no auth (default). /health is always unauthenticated so load
     balancers can probe readiness without a key.
+
+    embodiment_config: an `EmbodimentConfig` (per-robot config — action
+    space, normalization, gripper, control rate, constraints). Optional —
+    None means existing behavior. Stored on the server instance as
+    `server.embodiment_config` so downstream consumers (RTC adapter,
+    action denormalization, reflex doctor) can read it. See
+    `src/reflex/embodiments/` and `docs/embodiment_schema.md`.
     """
     try:
         from contextlib import asynccontextmanager
@@ -1087,12 +1095,24 @@ def create_app(
             batch_timeout_ms=batch_timeout_ms,
         )
 
+    # Attach embodiment config (B.1) — optional, downstream consumers
+    # (RTC adapter, action denormalization, reflex doctor) read via
+    # getattr(server, 'embodiment_config', None).
+    server.embodiment_config = embodiment_config
+
     @asynccontextmanager
     async def lifespan(app):
         # Initialize OTel tracing if [tracing] extra is installed AND
         # OTEL_EXPORTER_OTLP_ENDPOINT is set (or default localhost:4317).
         # No-ops cleanly if deps absent — server behavior unchanged.
         setup_tracing(service_name="reflex-vla")
+        if getattr(server, "embodiment_config", None) is not None:
+            ec = server.embodiment_config
+            logger.info(
+                "Embodiment config loaded: %s (action_dim=%d, control=%.1fHz, chunk=%d)",
+                ec.embodiment, ec.action_dim,
+                ec.control["frequency_hz"], ec.control["chunk_size"],
+            )
         server.load()
         # Only configure replan buffering after load() so chunk_size is known.
         if replan_hz is not None and execute_hz is not None and hasattr(

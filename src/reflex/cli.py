@@ -861,6 +861,20 @@ def serve(
         help="Execute frequency in Hz — the rate at which the robot pops "
              "an action from the buffer. Only used when --replan-hz > 0.",
     ),
+    embodiment: str = typer.Option(
+        "",
+        help="Per-embodiment config preset name (franka, so100, ur5, etc.). "
+             "Loads configs/embodiments/<name>.json. Empty = no embodiment "
+             "config (current default behavior). See "
+             "docs/embodiment_schema.md for the schema and adding new presets.",
+    ),
+    custom_embodiment_config: str = typer.Option(
+        "",
+        "--custom-embodiment-config",
+        help="Path to a custom embodiment config JSON. Overrides --embodiment "
+             "if both are set. Use this for robots not covered by the shipped "
+             "presets.",
+    ),
     ros2: bool = typer.Option(
         False,
         "--ros2",
@@ -890,6 +904,49 @@ def serve(
     if not onnx_files:
         console.print(f"[red]No ONNX files found in {export_dir}[/red]")
         raise typer.Exit(1)
+
+    # Resolve --embodiment / --custom-embodiment-config (B.1). Validate
+    # early — before any compute or runtime checks — so a bad config fails
+    # loud at the CLI layer, not at first /act.
+    embodiment_cfg = None
+    if custom_embodiment_config or embodiment:
+        from reflex.embodiments import EmbodimentConfig, list_presets
+        from reflex.embodiments.validate import (
+            format_errors,
+            validate_embodiment_config,
+        )
+        try:
+            if custom_embodiment_config:
+                if embodiment:
+                    console.print(
+                        f"[yellow]--custom-embodiment-config overrides "
+                        f"--embodiment {embodiment}[/yellow]"
+                    )
+                embodiment_cfg = EmbodimentConfig.load_custom(custom_embodiment_config)
+            else:
+                embodiment_cfg = EmbodimentConfig.load_preset(embodiment)
+        except (FileNotFoundError, ValueError) as exc:
+            console.print(f"[red]Failed to load embodiment config: {exc}[/red]")
+            console.print(
+                f"[dim]Available presets: {list_presets() or '(none)'}[/dim]"
+            )
+            raise typer.Exit(1)
+
+        ok, errs = validate_embodiment_config(embodiment_cfg)
+        if not ok:
+            console.print(
+                f"[red]Embodiment config '{embodiment_cfg.embodiment}' failed "
+                f"validation:[/red]"
+            )
+            console.print(format_errors(errs))
+            raise typer.Exit(1)
+        warnings = [e for e in errs if e["severity"] == "warn"]
+        if warnings:
+            console.print(
+                f"[yellow]Embodiment config '{embodiment_cfg.embodiment}' "
+                f"has warnings:[/yellow]"
+            )
+            console.print(format_errors(warnings))
 
     # ROS2 mode short-circuits the HTTP path — hand off to the bridge.
     if ros2:
@@ -960,6 +1017,8 @@ def serve(
         composed.append(f"[cyan]deadline[/cyan]={deadline_ms:.0f}ms")
     if max_batch > 1:
         composed.append(f"[cyan]batch[/cyan]={max_batch}@{batch_timeout_ms:.0f}ms")
+    if embodiment_cfg is not None:
+        composed.append(f"[cyan]embodiment[/cyan]={embodiment_cfg.embodiment}")
     if composed:
         console.print(f"  Wedges:  {' · '.join(composed)}")
 
@@ -1009,6 +1068,7 @@ def serve(
         api_key=api_key or None,
         replan_hz=replan_hz if replan_hz > 0 else None,
         execute_hz=execute_hz if execute_hz > 0 else None,
+        embodiment_config=embodiment_cfg,
     )
     if api_key:
         composed.append("[cyan]api-key-auth[/cyan]")
