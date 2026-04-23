@@ -31,7 +31,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .tracing import get_tracer, setup_tracing, shutdown_tracing
+
 logger = logging.getLogger(__name__)
+_tracer = get_tracer(__name__)
 
 
 class ReflexServer:
@@ -1086,6 +1089,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app):
+        # Initialize OTel tracing if [tracing] extra is installed AND
+        # OTEL_EXPORTER_OTLP_ENDPOINT is set (or default localhost:4317).
+        # No-ops cleanly if deps absent — server behavior unchanged.
+        setup_tracing(service_name="reflex-vla")
         server.load()
         # Only configure replan buffering after load() so chunk_size is known.
         if replan_hz is not None and execute_hz is not None and hasattr(
@@ -1123,6 +1130,7 @@ def create_app(
             yield
         finally:
             await server.stop_batch_worker()
+            shutdown_tracing()
 
     app = FastAPI(
         title="Reflex VLA Server",
@@ -1159,12 +1167,43 @@ def create_app(
 
     @app.post("/act")
     async def act(request: PredictRequest, _auth: None = Depends(_require_api_key)):
-        result = await server.predict_from_base64_async(
-            image_b64=request.image,
-            instruction=request.instruction,
-            state=request.state,
-        )
-        return JSONResponse(content=result)
+        # OTel span — no-op when [tracing] extra not installed.
+        # Attribute namespace: gen_ai.* (OTel SemConv stable) for cross-tool
+        # compatibility; reflex.* for VLA-specific extensions.
+        with _tracer.start_as_current_span("act") as span:
+            span.set_attribute("gen_ai.operation.name", "act")
+            span.set_attribute("gen_ai.request.model", str(server.export_dir))
+            span.set_attribute(
+                "reflex.instruction",
+                request.instruction[:512] if request.instruction else "",
+            )
+            span.set_attribute(
+                "reflex.state_dim", len(request.state) if request.state else 0
+            )
+            span.set_attribute(
+                "reflex.image_bytes", len(request.image) if request.image else 0
+            )
+            result = await server.predict_from_base64_async(
+                image_b64=request.image,
+                instruction=request.instruction,
+                state=request.state,
+            )
+            if isinstance(result, dict):
+                if "latency_ms" in result:
+                    span.set_attribute(
+                        "reflex.inference_ms", float(result["latency_ms"])
+                    )
+                if "inference_mode" in result:
+                    span.set_attribute(
+                        "reflex.inference_mode", str(result["inference_mode"])
+                    )
+                if "actions" in result and isinstance(result["actions"], list):
+                    span.set_attribute(
+                        "reflex.action_chunk_len", len(result["actions"])
+                    )
+                if "error" in result:
+                    span.set_attribute("error.type", str(result.get("error", ""))[:200])
+            return JSONResponse(content=result)
 
     @app.get("/config")
     async def config(_auth: None = Depends(_require_api_key)):

@@ -41,6 +41,18 @@ clone_if_missing trtllm                  https://github.com/NVIDIA/TensorRT-LLM.
 clone_if_missing lerobot                 https://github.com/huggingface/lerobot.git
 clone_if_missing openpi                  https://github.com/Physical-Intelligence/openpi.git
 
+# Robot embodiment configs (URDF / MJCF) — for per-embodiment-configs (B.1)
+clone_if_missing mujoco_menagerie        https://github.com/google-deepmind/mujoco_menagerie.git
+
+# Record/replay + OTel GenAI tracing backend — for record-replay (B.2)
+clone_if_missing phoenix                 https://github.com/Arize-ai/phoenix.git
+
+# Robot policy server prior art (gRPC + 1kHz control loop) — serve patterns
+clone_if_missing fairo                   https://github.com/facebookresearch/fairo.git
+
+# ACT — the chunking primitive A2C2 corrects against (B.4 + B.5)
+clone_if_missing act                     https://github.com/tonyzhaozh/act.git
+
 echo ""
 echo "[reference] done. Total size:"
 du -sh . 2>/dev/null || true
@@ -59,11 +71,24 @@ re-grep. Format:
 
 - `vllm/vllm/core/block_manager_v2.py` — paged-attention KV cache. Read
   before designing episode-aware prefix cache.
+- `vllm/vllm/entrypoints/openai/api_server.py` — lifespan + warmup + SIGTERM
+  drain pattern. Reference for prewarm-crash-recovery (Phase 0.5).
 - `lerobot/lerobot/policies/pi05/processing_pi05.py` — pi0.5
   preprocessor. State-in-lang behavior is in PI05PrepareTokenizerStep.
+- `lerobot/lerobot/common/robot_devices/control_utils.py` — action/observation
+  schemas. Reference for dataset-validator (Phase 0.5).
 - `openpi/src/openpi/policies/pi0_pytorch.py` — canonical pi0 forward.
+- `openpi/src/openpi/policies/` — RTC overlap logic. Reference for B.3.
 - `triton/src/core/dynamic_batch_scheduler.cc` — Triton's batching
   scheduler. Reference for our continuous-batching work.
+- `mujoco_menagerie/franka_emika_panda/`, `.../so_arm100/`, `.../universal_robots_ur5e/` —
+  canonical URDF/MJCF for embodiments we target. Reference for B.1.
+- `phoenix/src/phoenix/trace/` — OTel span ingestion + replay primitives.
+  Reference for B.2 record-replay.
+- `fairo/polymetis/` — the only battle-tested robot policy server worth
+  dissecting. Reference for serve lifecycle + 1kHz control loop patterns.
+- `act/detr/models/detr_vae.py` — the chunk-predicting policy architecture
+  A2C2 corrects against. Reference for B.4 + B.5.
 
 (Add yours below)
 

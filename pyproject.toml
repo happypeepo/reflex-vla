@@ -97,6 +97,15 @@ eval = [
     "h5py",
 ]
 dev = ["pytest>=8.0", "ruff>=0.4.0", "mypy>=1.10", "httpx>=0.24.0"]
+# OTel record/replay backend integration (Phoenix-compatible). Optional —
+# server runs fine without it; if installed AND OTEL_EXPORTER_OTLP_ENDPOINT
+# is set, every /act call emits an OTel span with VLA-specific attributes.
+# Phoenix is the recommended local backend (`pip install arize-phoenix`,
+# `phoenix serve`). See features/01_serve/subfeatures/_rtc_a2c2/record-replay.md.
+tracing = [
+    "opentelemetry-sdk>=1.30",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.30",
+]
 
 [project.scripts]
 reflex = "reflex.cli:app"
