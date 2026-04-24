@@ -410,8 +410,9 @@ goals:
     weight: 2
 
   - id: serve-rtc-wrapper
-    description: "Wrap lerobot.policies.rtc for Real-Time Chunking (replan-while-execute pattern from arxiv 2506.07339). Pi0/pi05 are designed to be run with RTC; without it serve leaves 2-3x throughput on the table. Skeleton shipped 2026-04-23 (commit f8b529c, src/reflex/runtime/rtc_adapter.py). Full build: 5-7 days once per-embodiment configs land. Design grounded in reference/deep_dive_lerobot_rtc.md (692 lines). Downstream research: learned-RTC-schedule from deployment traces (reasoning doc #3) — Phase 2+ after base RTC ships."
+    description: "Wrap lerobot.policies.rtc for Real-Time Chunking (replan-while-execute pattern from arxiv 2506.07339). Pi0/pi05 are designed to be run with RTC; without it serve leaves 2-3x throughput on the table. PARTIAL 2026-04-24: Days 1-5 of B.3 sprint shipped (5 commits 2bd9a44 + 6c931fe + e032b34 + d21514b + 03a4345; 1678 lines, 87 tests). Foundation complete: RtcAdapter constructs lerobot RTCProcessor, predict_chunk_with_rtc body wired with latency dispatch + fallback, prev_chunk_left_over carry-forward, /act handler integration with episode_id reset hook. ARMED-BUT-INERT: Pi05DecomposedInference still ignores RTC kwargs; refactor + Modal LIBERO 5-task validation are the follow-up. Design grounded in reference/deep_dive_lerobot_rtc.md (692 lines). Downstream research: learned-RTC-schedule from deployment traces (reasoning doc #3) — Phase 2+ after base RTC ships."
     check: "test -f src/reflex/runtime/rtc_adapter.py && grep -q 'class RtcAdapter' src/reflex/runtime/rtc_adapter.py 2>/dev/null"
+    status: partial
     weight: 10
 
   - id: serve-one-line-install
