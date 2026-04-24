@@ -982,6 +982,7 @@ try:
         image: str | None = None  # base64 encoded
         instruction: str = ""
         state: list[float] | None = None
+        episode_id: str | None = None  # B.3: triggers RTC reset on change
 
     class HealthResponse(BaseModel):
         status: str
@@ -1283,6 +1284,22 @@ def create_app(
             span.set_attribute(
                 "reflex.image_bytes", len(request.image) if request.image else 0
             )
+
+            # RTC episode-boundary reset (B.3). Runs BEFORE predict so the
+            # latency tracker + carry-forward state are fresh for the new
+            # episode's first chunk. No-op when adapter absent or episode
+            # unchanged.
+            _rtc = getattr(server, "rtc_adapter", None)
+            if (
+                _rtc is not None
+                and request.episode_id is not None
+                and request.episode_id != _rtc._active_episode_id
+            ):
+                _rtc.reset(episode_id=request.episode_id)
+                span.set_attribute("reflex.rtc.episode_reset", True)
+            if _rtc is not None and request.episode_id:
+                span.set_attribute("reflex.rtc.episode_id", request.episode_id)
+
             result = await server.predict_from_base64_async(
                 image_b64=request.image,
                 instruction=request.instruction,
@@ -1303,6 +1320,24 @@ def create_app(
                     )
                 if "error" in result:
                     span.set_attribute("error.type", str(result.get("error", ""))[:200])
+
+            # RTC post-predict carry-state update (B.3). Snapshots buffer +
+            # pushes new chunk + records latency on the adapter's tracker.
+            # No-op when adapter absent OR result has an error OR actions empty.
+            if (
+                _rtc is not None
+                and isinstance(result, dict)
+                and "error" not in result
+                and isinstance(result.get("actions"), list)
+                and result["actions"]
+            ):
+                try:
+                    actions_arr = np.asarray(result["actions"], dtype=np.float32)
+                    latency_s = float(result.get("latency_ms", 0.0)) / 1000.0
+                    _rtc.merge_and_update(actions_arr, elapsed_time=latency_s)
+                    span.set_attribute("reflex.rtc.chunk_count", _rtc._chunk_count)
+                except Exception as e:  # noqa: BLE001 — RTC must never break /act
+                    logger.warning("RTC merge_and_update failed: %s", e)
 
             # JSONL record hook (B.2). Writes inside the OTel span context
             # so the seq attribute below cross-links the two ledgers. Recorder
