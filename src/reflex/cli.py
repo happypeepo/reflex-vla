@@ -1025,6 +1025,24 @@ def serve(
              "exclusive with the HTTP flags above (port, host, api-key, "
              "max-batch, etc. are ignored in ROS2 mode).",
     ),
+    slo: str = typer.Option(
+        "",
+        "--slo",
+        help="Latency SLO spec (e.g. 'p99=150ms'). When set, the server tracks "
+             "per-request /act latency in a rolling window, emits "
+             "reflex_slo_violations_total Prometheus metric when the percentile "
+             "exceeds threshold, and optionally returns HTTP 503 (see --slo-mode). "
+             "Phase 1 supports a single global SLO on /act; per-endpoint SLO is "
+             "Phase 1.5.",
+    ),
+    slo_mode: str = typer.Option(
+        "degrade",
+        "--slo-mode",
+        help="SLO violation behavior: 'log_only' (metric only), '503' (return "
+             "HTTP 503 with measured p99 in body; client can fail over), or "
+             "'degrade' (Phase 1: same as log_only. Phase 1.5: drops NFE + "
+             "skips RTC eval to recover). Default 'degrade'.",
+    ),
     mcp: bool = typer.Option(
         False,
         "--mcp",
@@ -1247,6 +1265,22 @@ def serve(
         )
         raise typer.Exit(1)
 
+    # SLO enforcement (Phase 1 latency-slo-enforcement feature).
+    # --slo required to enable; default mode is "degrade".
+    slo_tracker = None
+    if slo:
+        try:
+            from reflex.runtime.slo import SLOTracker, parse_slo_spec, validate_slo_mode
+            _slo_spec = parse_slo_spec(slo)
+            _slo_mode_validated = validate_slo_mode(slo_mode)
+            slo_tracker = SLOTracker(_slo_spec)
+        except ValueError as exc:
+            console.print(f"[red]SLO config invalid: {exc}[/red]")
+            raise typer.Exit(1)
+        composed.append(f"[cyan]slo={slo}/{slo_mode}[/cyan]")
+    else:
+        _slo_mode_validated = "degrade"  # ignored when slo_tracker is None
+
     app_instance = create_app(
         export_dir,
         device=device,
@@ -1269,6 +1303,8 @@ def serve(
         inject_latency_ms=inject_latency_ms,
         prewarm=not no_prewarm,
         max_consecutive_crashes=max_consecutive_crashes,
+        slo_tracker=slo_tracker,
+        slo_mode=_slo_mode_validated,
     )
     if api_key:
         composed.append("[cyan]api-key-auth[/cyan]")

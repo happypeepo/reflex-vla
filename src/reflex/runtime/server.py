@@ -1041,6 +1041,8 @@ def create_app(
     inject_latency_ms: float = 0.0,
     prewarm: bool = True,
     max_consecutive_crashes: int = 5,
+    slo_tracker: Any = None,  # reflex.runtime.slo.SLOTracker
+    slo_mode: str = "degrade",  # "log_only" | "503" | "degrade"
 ) -> Any:
     """Create a FastAPI app for serving VLA predictions.
 
@@ -1675,5 +1677,54 @@ def create_app(
     # (MCP server, future dashboards, test harnesses) can access the same
     # inference engine without recreating it. Per mcp-server Phase 1 wiring.
     app.state.reflex_server = server
+
+    # SLO enforcement middleware (Phase 1 latency-slo-enforcement feature).
+    # Measures /act latency, computes rolling p99, and reacts per slo_mode:
+    #   - "log_only": emit inc_slo_violation() metric only
+    #   - "503": metric + return HTTP 503 with {p99_measured, p99_slo, retry_after}
+    #   - "degrade": metric only in Phase 1 (actual degradation knobs ship
+    #     with adaptive-denoise-pi0 + chunk-budget-batching in Phase 1.5)
+    if slo_tracker is not None:
+        import time as _slo_time
+        from reflex.observability.prometheus import inc_slo_violation
+
+        _slo_embodiment = (
+            getattr(embodiment_config, "embodiment", "unknown")
+            if embodiment_config is not None else "unknown"
+        )
+        _slo_percentile_str = f"p{int(slo_tracker.spec.percentile)}"
+
+        @app.middleware("http")
+        async def _slo_middleware(request, call_next):
+            # Only measure /act (that's the latency SLO customers care about).
+            if request.url.path != "/act":
+                return await call_next(request)
+            t0 = _slo_time.perf_counter()
+            response = await call_next(request)
+            elapsed_ms = (_slo_time.perf_counter() - t0) * 1000.0
+            slo_tracker.record_latency_ms(elapsed_ms)
+            if slo_tracker.is_violating():
+                inc_slo_violation(
+                    embodiment=_slo_embodiment,
+                    kind=f"{_slo_percentile_str}_exceeded",
+                )
+                if slo_mode == "503":
+                    return JSONResponse(
+                        status_code=503,
+                        headers={"Retry-After": "1"},
+                        content={
+                            "error": "slo_violation",
+                            f"{_slo_percentile_str}_measured_ms": round(
+                                slo_tracker.current_p99(), 2
+                            ),
+                            f"{_slo_percentile_str}_slo_ms": slo_tracker.spec.threshold_ms,
+                            "retry_after_s": 1,
+                        },
+                    )
+                # "log_only" and "degrade" fall through — response already computed
+            return response
+
+        app.state.slo_tracker = slo_tracker
+        app.state.slo_mode = slo_mode
 
     return app
