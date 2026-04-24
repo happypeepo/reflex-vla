@@ -39,6 +39,11 @@ dependencies = [
     "transformers>=4.40,<5.4",
     "onnx>=1.15.0",
     "onnxscript>=0.1.0",
+    # ReflexClient (Phase 0.5 customer-sdk) — sync + async HTTP client.
+    # Lightweight (~2MB); shared with [serve] which already needs FastAPI's
+    # starlette/anyio stack. Adding here so `from reflex import ReflexClient`
+    # works on a bare `pip install reflex-vla`.
+    "httpx>=0.24.0",
 ]
 
 [project.optional-dependencies]

@@ -662,6 +662,12 @@ goals:
     status: done
     weight: 7
 
+  - id: serve-customer-sdk
+    description: "`from reflex.client import ReflexClient, ReflexAsyncClient` — sync + async Python SDK for `reflex serve`. SHIPPED 2026-04-24. Consumes the server contract 1:1 with 5 typed exceptions: ReflexAuthError (401, no retry), ReflexValidationError (422, no retry), ReflexServerNotReadyError (503 warming/loading/warmup_failed, retry with Retry-After), ReflexServerDegradedError (503 circuit-broken, no retry by default — operator decision; opt-in via retry_on_degraded=True), ReflexClientError (base + network errors with exponential backoff). Episode context manager auto-generates episode_id and propagates so server's RTC adapter resets correctly. Image encoder accepts numpy/PIL/path/bytes/str. Bearer auth via X-Reflex-Key header. ~410 LoC client + ~470 LoC tests (31 tests). httpx>=0.24.0 added to base deps (lightweight; ~2MB). Plan ref: features/01_serve/subfeatures/_dx_gaps/customer-sdk.md."
+    check: "test -d src/reflex/client && python -c 'from reflex.client import ReflexClient, ReflexAsyncClient, encode_image' 2>/dev/null"
+    status: done
+    weight: 8
+
   - id: serve-prometheus-grafana
     description: "/metrics Prometheus endpoint + Grafana dashboard template (12 metrics: latency histogram, cache hit/miss counters, denoise steps, safety/SLO violations, fallback invocations, model swaps, in-flight gauge, episodes active, server up). SHIPPED 2026-04-24 (commit ad03d4b; +931 lines, 20 tests). Cardinality-bounded (90 series budget; source-grep test enforces no instruction/request_id/user_id/timestamp labels). dashboards/grafana_template.json schemaVersion 39 — 5 panels, templating vars for embodiment + model_id. /metrics route in server.py has no auth (operators network-isolate per plan). Downstream features (webhooks, slo-enforcement, guard, hot-swap) import from reflex.observability instead of defining their own metrics. Plan ref: features/01_serve/subfeatures/_ecosystem/prometheus-grafana_plan.md."
     check: "test -f src/reflex/observability/prometheus.py && test -f dashboards/grafana_template.json && python -c 'from reflex.observability import render_metrics; assert b\"reflex_act_latency_seconds\" in render_metrics()' 2>/dev/null"
