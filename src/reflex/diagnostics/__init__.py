@@ -127,6 +127,14 @@ def _ensure_registry_loaded() -> None:
         check_rtc_chunks,
         check_vlm_tokenization,
     )
+    # Day 2 checks
+    from . import (  # noqa: F401
+        check_action_denorm,
+        check_gpu_memory,
+        check_gripper,
+        check_hardware_compat,
+        check_state_proprio,
+    )
 
 
 def run_all_checks(

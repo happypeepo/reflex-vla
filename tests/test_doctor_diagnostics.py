@@ -285,14 +285,110 @@ class TestExitCode:
 
 
 # ---------------------------------------------------------------------------
+# Day 2: check_action_denorm (LeRobot #414, #2210)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckActionDenorm:
+    def test_skip_on_custom_embodiment(self, tmp_path):
+        results = run_all_checks(str(tmp_path), "custom")
+        check = next(r for r in results if r.check_id == "check_action_denorm")
+        assert check.status == "skip"
+
+    def test_pass_on_franka_preset(self, tmp_path):
+        results = run_all_checks(str(tmp_path), "franka")
+        check = next(r for r in results if r.check_id == "check_action_denorm")
+        assert check.status == "pass"
+
+    def test_fail_on_unknown_embodiment(self, tmp_path):
+        results = run_all_checks(str(tmp_path), "nonsense-bot")
+        check = next(r for r in results if r.check_id == "check_action_denorm")
+        assert check.status == "fail"
+        assert check.remediation
+
+
+# ---------------------------------------------------------------------------
+# Day 2: check_gripper (LeRobot #2210, #2531)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckGripper:
+    def test_skip_on_custom(self, tmp_path):
+        results = run_all_checks(str(tmp_path), "custom")
+        check = next(r for r in results if r.check_id == "check_gripper")
+        assert check.status == "skip"
+
+    def test_pass_on_franka(self, tmp_path):
+        """Franka preset has gripper.component_idx=6 (valid in 7-D action),
+        close_threshold=0.5 (in [0,1]), inverted=False (matches default)."""
+        results = run_all_checks(str(tmp_path), "franka")
+        check = next(r for r in results if r.check_id == "check_gripper")
+        assert check.status == "pass"
+
+    def test_fail_on_unknown(self, tmp_path):
+        results = run_all_checks(str(tmp_path), "nonsense-bot")
+        check = next(r for r in results if r.check_id == "check_gripper")
+        assert check.status == "fail"
+        assert check.remediation
+
+
+# ---------------------------------------------------------------------------
+# Day 2: check_state_proprio (LeRobot #2458)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckStateProprio:
+    def test_skip_when_no_export(self, tmp_path):
+        results = run_all_checks(str(tmp_path / "missing"), "franka")
+        check = next(r for r in results if r.check_id == "check_state_proprio")
+        assert check.status == "skip"
+
+    def test_skip_when_no_onnx(self, tmp_path):
+        results = run_all_checks(str(tmp_path), "franka")  # empty dir
+        check = next(r for r in results if r.check_id == "check_state_proprio")
+        assert check.status == "skip"
+
+
+# ---------------------------------------------------------------------------
+# Day 2: check_gpu_memory (LeRobot #2137)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckGpuMemory:
+    def test_skip_when_no_nvidia_smi(self, tmp_path):
+        """On dev mac (no nvidia-smi on PATH), skip cleanly."""
+        results = run_all_checks(str(tmp_path), "custom")
+        check = next(r for r in results if r.check_id == "check_gpu_memory")
+        # Skip on macOS (no nvidia-smi); pass/fail/warn possible on Linux+GPU
+        assert check.status in ("skip", "pass", "fail", "warn")
+        if check.status == "fail":
+            assert check.remediation
+
+
+# ---------------------------------------------------------------------------
+# Day 2: check_hardware_compat (CUDA/cuDNN/TRT)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckHardwareCompat:
+    def test_runs_without_crashing(self, tmp_path):
+        """Cross-platform: warn on dev mac, pass/warn on production GPU."""
+        results = run_all_checks(str(tmp_path), "custom")
+        check = next(r for r in results if r.check_id == "check_hardware_compat")
+        assert check.status in ("pass", "warn", "fail")
+        if check.status in ("warn", "fail"):
+            assert check.remediation
+
+
+# ---------------------------------------------------------------------------
 # End-to-end smoke
 # ---------------------------------------------------------------------------
 
 
 class TestSmoke:
-    def test_runs_all_5_day1_checks(self, tmp_path):
+    def test_runs_all_10_checks(self, tmp_path):
         results = run_all_checks(str(tmp_path), "custom", rtc=False)
-        assert len(results) == 5
+        assert len(results) == 10
         ids = {r.check_id for r in results}
         assert ids == {
             "check_model_load",
@@ -300,13 +396,18 @@ class TestSmoke:
             "check_vlm_tokenization",
             "check_image_dims",
             "check_rtc_chunks",
+            "check_action_denorm",
+            "check_gripper",
+            "check_state_proprio",
+            "check_gpu_memory",
+            "check_hardware_compat",
         }
 
     @pytest.mark.parametrize("emb", ["franka", "so100", "ur5"])
     def test_runs_against_each_preset(self, emb, tmp_path):
         (tmp_path / "model.onnx").write_bytes(b"\x00")
         results = run_all_checks(str(tmp_path), emb, rtc=True)
-        assert len(results) == 5
+        assert len(results) == 10
         for r in results:
             assert r.status in {"pass", "fail", "warn", "skip"}
             if r.status == "fail":
@@ -315,10 +416,11 @@ class TestSmoke:
     def test_skip_arg_works(self, tmp_path):
         results = run_all_checks(
             str(tmp_path), "franka",
-            skip=["check_image_dims", "check_rtc_chunks"],
+            skip=["check_image_dims", "check_rtc_chunks", "check_gpu_memory"],
         )
         skipped = [r for r in results if r.check_id in (
-            "check_image_dims", "check_rtc_chunks"
+            "check_image_dims", "check_rtc_chunks", "check_gpu_memory"
         )]
+        assert len(skipped) == 3
         assert all(r.status == "skip" for r in skipped)
         assert all("--skip" in r.expected for r in skipped)
