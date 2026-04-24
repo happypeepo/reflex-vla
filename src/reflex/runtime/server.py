@@ -1671,4 +1671,9 @@ def create_app(
         g.reset()
         return JSONResponse(content={"reset": True, "was_tripped": was_tripped})
 
+    # Attach the live ReflexServer to app.state so downstream integrations
+    # (MCP server, future dashboards, test harnesses) can access the same
+    # inference engine without recreating it. Per mcp-server Phase 1 wiring.
+    app.state.reflex_server = server
+
     return app

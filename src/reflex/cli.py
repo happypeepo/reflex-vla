@@ -1025,6 +1025,30 @@ def serve(
              "exclusive with the HTTP flags above (port, host, api-key, "
              "max-batch, etc. are ignored in ROS2 mode).",
     ),
+    mcp: bool = typer.Option(
+        False,
+        "--mcp",
+        help="Expose the server as a Model Context Protocol surface so MCP-"
+             "compatible agents (Claude Desktop, Cursor, custom) can discover "
+             "Reflex in the mcp.so catalog and call /act as a tool. Additive "
+             "to the HTTP API on stdio/HTTP transports. With --mcp-transport "
+             "stdio (default), the MCP server owns stdin/stdout and FastAPI "
+             "is NOT started (use for Claude Desktop / Cursor integration). "
+             "With --mcp-transport http, both MCP (on --mcp-port) and FastAPI "
+             "(on --port) run concurrently. Requires `pip install reflex-vla[mcp]`.",
+    ),
+    mcp_transport: str = typer.Option(
+        "stdio",
+        "--mcp-transport",
+        help="MCP transport: 'stdio' (default; for Claude Desktop / Cursor) or "
+             "'http' (streamable-http on --mcp-port). Only used when --mcp is set.",
+    ),
+    mcp_port: int = typer.Option(
+        8001,
+        "--mcp-port",
+        help="MCP HTTP port (only when --mcp --mcp-transport http). Separate from "
+             "--port which is the FastAPI port.",
+    ),
     verbose: bool = typer.Option(False, help="Verbose logging"),
 ):
     """Start a VLA inference server. POST /act with image + instruction → actions.
@@ -1252,6 +1276,53 @@ def serve(
         composed.append(
             f"[cyan]replan[/cyan]={replan_hz:g}Hz/execute={execute_hz:g}Hz"
         )
+    # MCP server integration (Phase 1 mcp-server feature).
+    # --mcp --mcp-transport stdio: MCP-only mode (FastAPI NOT started — stdio
+    #   needs to own stdin/stdout; used for Claude Desktop / Cursor).
+    # --mcp --mcp-transport http: both MCP (on --mcp-port) AND FastAPI run.
+    # no --mcp: FastAPI only (legacy behavior).
+    if mcp:
+        if mcp_transport not in ("stdio", "http"):
+            console.print(
+                f"[red]Invalid --mcp-transport {mcp_transport!r}; expected 'stdio' or 'http'.[/red]"
+            )
+            raise typer.Exit(1)
+        try:
+            from reflex.mcp import create_mcp_server
+        except ImportError:
+            console.print(
+                "[red]MCP dependency not installed. Run:[/red]\n"
+                "  [cyan]pip install reflex-vla[mcp][/cyan]"
+            )
+            raise typer.Exit(1)
+        # Pull the live ReflexServer out of the FastAPI app's state
+        reflex_srv = getattr(app_instance.state, "reflex_server", None)
+        if reflex_srv is None:
+            console.print(
+                "[red]Could not find ReflexServer on the app state; MCP needs a live "
+                "inference engine. Report this at github.com/rylinjames/reflex-vla/issues.[/red]"
+            )
+            raise typer.Exit(1)
+        mcp_srv = create_mcp_server(reflex_srv)
+        composed.append(f"[cyan]mcp={mcp_transport}[/cyan]")
+
+        if mcp_transport == "stdio":
+            console.print("[bold green]Starting MCP server (stdio)...[/bold green]")
+            console.print("[dim]FastAPI NOT started — stdio owns stdin/stdout.[/dim]")
+            # mcp.run() blocks until client disconnects
+            mcp_srv.run(transport="stdio")
+            return
+        # HTTP mode: run MCP in a background thread, FastAPI on main thread
+        import threading
+        def _run_mcp_http():
+            mcp_srv.run(transport="streamable-http", host="127.0.0.1", port=mcp_port)
+        mcp_thread = threading.Thread(target=_run_mcp_http, daemon=True, name="mcp-http")
+        mcp_thread.start()
+        console.print(
+            f"[bold green]MCP server running on http://127.0.0.1:{mcp_port} "
+            f"(streamable-http)[/bold green]"
+        )
+
     console.print("[bold green]Starting server...[/bold green]")
     uvicorn.run(app_instance, host=host, port=port, log_level="info" if verbose else "warning")
 
