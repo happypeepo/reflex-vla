@@ -943,6 +943,25 @@ def serve(
              "for the A2C2 transfer gate; see arxiv 2509.23224 §4 for "
              "matching paper methodology.",
     ),
+    no_prewarm: bool = typer.Option(
+        False,
+        "--no-prewarm",
+        help="Skip the synthetic warmup forward at lifespan startup. Default "
+             "behavior: warmup runs, /health returns 503 until warmup succeeds, "
+             "then 200. With --no-prewarm: /health returns 200 the moment "
+             "server.load() completes; first /act bears the 30-90s engine-build "
+             "cost. Use only for fast-start dev workflows; production behind a "
+             "load balancer should leave prewarm ON.",
+    ),
+    max_consecutive_crashes: int = typer.Option(
+        5,
+        "--max-consecutive-crashes",
+        help="Circuit breaker: after this many consecutive /act predict "
+             "exceptions or error-result responses, server.health_state flips "
+             "to 'degraded' — /health returns 503, /act returns 503 with "
+             "Retry-After: 60. Successful /act resets the counter. Default 5. "
+             "Set to 0 to disable.",
+    ),
     ros2: bool = typer.Option(
         False,
         "--ros2",
@@ -1171,6 +1190,8 @@ def serve(
         record_gzip=not record_no_gzip,
         rtc_config=rtc_cfg,
         inject_latency_ms=inject_latency_ms,
+        prewarm=not no_prewarm,
+        max_consecutive_crashes=max_consecutive_crashes,
     )
     if api_key:
         composed.append("[cyan]api-key-auth[/cyan]")

@@ -650,6 +650,12 @@ goals:
     check: "grep -q 'reflex_server_up' src/reflex/observability/prometheus.py 2>/dev/null"
     weight: 10
 
+  - id: serve-prewarm-crash-recovery
+    description: "Prewarm at lifespan startup + crash-recovery circuit breaker on /act. SHIPPED 2026-04-24 — 6-state health machine (initializing → loading → warming → ready, with degraded + warmup_failed terminal-ish states). /health returns HTTP 503 unless state=ready (fixes load-balancer-thinks-server-ready-during-30s-warmup bug). /act circuit breaker: increments counter on consecutive predict exceptions OR error-result responses; resets on success; at threshold (default 5) flips to degraded → /act 503 + Retry-After: 60. CLI: --no-prewarm (default: prewarm ON) + --max-consecutive-crashes N. Loud lifecycle logs. ~165 LoC server + 25 LoC cli + 350 LoC tests (22 tests). Plan ref: features/01_serve/subfeatures/_dx_gaps/prewarm-crash-recovery.md."
+    check: "grep -q 'health_state\\|max_consecutive_crashes' src/reflex/runtime/server.py && grep -q 'no-prewarm' src/reflex/cli.py 2>/dev/null"
+    status: done
+    weight: 8
+
   - id: serve-prometheus-grafana
     description: "/metrics Prometheus endpoint + Grafana dashboard template (12 metrics: latency histogram, cache hit/miss counters, denoise steps, safety/SLO violations, fallback invocations, model swaps, in-flight gauge, episodes active, server up). SHIPPED 2026-04-24 (commit ad03d4b; +931 lines, 20 tests). Cardinality-bounded (90 series budget; source-grep test enforces no instruction/request_id/user_id/timestamp labels). dashboards/grafana_template.json schemaVersion 39 — 5 panels, templating vars for embodiment + model_id. /metrics route in server.py has no auth (operators network-isolate per plan). Downstream features (webhooks, slo-enforcement, guard, hot-swap) import from reflex.observability instead of defining their own metrics. Plan ref: features/01_serve/subfeatures/_ecosystem/prometheus-grafana_plan.md."
     check: "test -f src/reflex/observability/prometheus.py && test -f dashboards/grafana_template.json && python -c 'from reflex.observability import render_metrics; assert b\"reflex_act_latency_seconds\" in render_metrics()' 2>/dev/null"

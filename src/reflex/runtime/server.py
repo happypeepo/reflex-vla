@@ -1039,6 +1039,8 @@ def create_app(
     record_gzip: bool = True,
     rtc_config: Any = None,
     inject_latency_ms: float = 0.0,
+    prewarm: bool = True,
+    max_consecutive_crashes: int = 5,
 ) -> Any:
     """Create a FastAPI app for serving VLA predictions.
 
@@ -1062,6 +1064,20 @@ def create_app(
     transfer-validation gate. 0.0 (default) = no injection. Range
     [0, 1000]; values outside clamp at the edges. The matching paper
     methodology is arxiv 2509.23224 §4 ("100ms injected delay").
+
+    prewarm: when True (default), run one synthetic forward at lifespan
+    startup so any lazy ONNX/TRT engine build happens before users hit
+    /act. /health returns HTTP 503 throughout warmup and HTTP 200 only
+    after a successful warmup. Setting False skips warmup — /health
+    becomes 200 the moment server.load() completes, but the first /act
+    bears the 30-90s engine-build cost. Prewarm ON is the right default
+    for production behind a load balancer.
+
+    max_consecutive_crashes: circuit-breaker threshold. After this many
+    consecutive /act inference exceptions or error-result responses,
+    server.health_state flips to "degraded" — /health returns 503 and
+    /act returns 503 with Retry-After: 60. Successful /act resets the
+    counter. Default 5. Set to 0 to disable.
     """
     try:
         from contextlib import asynccontextmanager
@@ -1241,6 +1257,17 @@ def create_app(
             logger.error("RecordWriter init failed (recording disabled): %s", e)
             server._recorder = None  # type: ignore[attr-defined]
 
+    # Prewarm + circuit-breaker state (initialized BEFORE lifespan so /health
+    # can be queried immediately at process startup — important for orchestrators
+    # that probe before lifespan completes). State machine:
+    #   "initializing" → "loading" → "warming" → "ready"
+    #                                          ↘ "warmup_failed" (graceful degrade)
+    #                              "ready" → "degraded" (circuit broken on /act)
+    server.health_state = "initializing"  # type: ignore[attr-defined]
+    server.consecutive_crash_count = 0  # type: ignore[attr-defined]
+    server.max_consecutive_crashes = int(max_consecutive_crashes)  # type: ignore[attr-defined]
+    server.prewarm_enabled = bool(prewarm)  # type: ignore[attr-defined]
+
     @asynccontextmanager
     async def lifespan(app):
         # Initialize OTel tracing if [tracing] extra is installed AND
@@ -1257,6 +1284,7 @@ def create_app(
                 ec.embodiment, ec.action_dim,
                 ec.control["frequency_hz"], ec.control["chunk_size"],
             )
+        server.health_state = "loading"  # type: ignore[attr-defined]
         server.load()
         # Only configure replan buffering after load() so chunk_size is known.
         if replan_hz is not None and execute_hz is not None and hasattr(
@@ -1272,22 +1300,45 @@ def create_app(
         # ORT graph optimization passes) happens before users hit /act.
         # Without this, the first /act request takes 30-90s with TRT EP enabled
         # because TRT builds + caches an engine on first call.
-        try:
-            logger.info("Warming up — running one denoising loop to JIT the engine...")
-            import time as _t
-            _t0 = _t.perf_counter()
-            warmup_result = server.predict()
-            _elapsed = (_t.perf_counter() - _t0) * 1000
-            if "error" in warmup_result:
-                logger.warning("Warmup returned error: %s", warmup_result["error"])
-            else:
-                logger.info(
-                    "Warmup complete in %.0fms (mode=%s). Subsequent /act calls "
-                    "will use the cached TRT engine if applicable.",
-                    _elapsed, warmup_result.get("inference_mode", "?"),
+        if server.prewarm_enabled:
+            server.health_state = "warming"  # type: ignore[attr-defined]
+            logger.warning(
+                "GPU kernel warmup starting — first /act takes ~30-60s, "
+                "/health returns 503 until ready (use --no-prewarm to skip)"
+            )
+            try:
+                import time as _t
+                _t0 = _t.perf_counter()
+                warmup_result = server.predict()
+                _elapsed = (_t.perf_counter() - _t0) * 1000
+                if isinstance(warmup_result, dict) and "error" in warmup_result:
+                    server.health_state = "warmup_failed"  # type: ignore[attr-defined]
+                    logger.error(
+                        "Warmup FAILED with error result — /health returns 503 "
+                        "(server stays up but degraded): %s",
+                        warmup_result["error"],
+                    )
+                else:
+                    server.health_state = "ready"  # type: ignore[attr-defined]
+                    logger.info(
+                        "Warmup complete in %.0fms (mode=%s) — server READY "
+                        "(/health returns 200). Subsequent /act calls will use "
+                        "the cached TRT engine if applicable.",
+                        _elapsed,
+                        warmup_result.get("inference_mode", "?") if isinstance(warmup_result, dict) else "?",
+                    )
+            except Exception as e:
+                server.health_state = "warmup_failed"  # type: ignore[attr-defined]
+                logger.error(
+                    "Warmup FAILED with exception — /health returns 503 "
+                    "(server stays up but degraded): %s", e,
                 )
-        except Exception as e:
-            logger.warning("Warmup failed (server still up): %s", e)
+        else:
+            server.health_state = "ready"  # type: ignore[attr-defined]
+            logger.info(
+                "Prewarm SKIPPED (--no-prewarm). First /act will take ~30-60s "
+                "to JIT the engine. /health returns 200 immediately."
+            )
 
         await server.start_batch_worker()
         try:
@@ -1327,15 +1378,26 @@ def create_app(
                 detail="missing or invalid X-Reflex-Key header",
             )
 
-    @app.get("/health", response_model=HealthResponse)
+    @app.get("/health")
     async def health():
-        return HealthResponse(
-            status="ok" if server.ready else "not_ready",
-            model_loaded=server.ready,
-            inference_mode=getattr(server, "_inference_mode", ""),
-            export_dir=str(server.export_dir),
-            vlm_loaded=getattr(server, "_vlm_loaded", False),
-        )
+        # Prewarm + crash-recovery state machine. HTTP 200 only when the
+        # health_state is "ready" — load balancers / orchestrators correctly
+        # skip the server during warmup, on warmup failure, and after
+        # circuit-breaker degradation. Body always returns the granular state
+        # for human debugging.
+        state = getattr(server, "health_state", "initializing")
+        body = {
+            "status": "ok" if state == "ready" else "not_ready",
+            "state": state,
+            "model_loaded": server.ready,
+            "inference_mode": getattr(server, "_inference_mode", ""),
+            "export_dir": str(server.export_dir),
+            "vlm_loaded": getattr(server, "_vlm_loaded", False),
+            "consecutive_crashes": int(getattr(server, "consecutive_crash_count", 0)),
+            "max_consecutive_crashes": int(getattr(server, "max_consecutive_crashes", 5)),
+        }
+        http_status = 200 if state == "ready" else 503
+        return JSONResponse(content=body, status_code=http_status)
 
     @app.get("/metrics")
     async def metrics():
@@ -1350,6 +1412,20 @@ def create_app(
 
     @app.post("/act")
     async def act(request: PredictRequest, _auth: None = Depends(_require_api_key)):
+        # Circuit breaker: refuse traffic when the consecutive-crash threshold
+        # has tripped. Operators must restart the server to clear "degraded".
+        # Returns 503 + Retry-After=60 so well-behaved clients back off.
+        if getattr(server, "health_state", "ready") == "degraded":
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "server-degraded",
+                    "consecutive_crashes": int(getattr(server, "consecutive_crash_count", 0)),
+                    "max_consecutive_crashes": int(getattr(server, "max_consecutive_crashes", 5)),
+                    "hint": "circuit breaker tripped; restart server to clear",
+                },
+                headers={"Retry-After": "60"},
+            )
         # Determine embodiment label for metrics. Bounded enum (per
         # ORGANIZATION.md/cardinality budget): preset name OR 'custom'.
         _ec = getattr(server, "embodiment_config", None)
@@ -1391,11 +1467,51 @@ def create_app(
             if _rtc is not None and request.episode_id:
                 span.set_attribute("reflex.rtc.episode_id", request.episode_id)
 
-            result = await server.predict_from_base64_async(
-                image_b64=request.image,
-                instruction=request.instruction,
-                state=request.state,
-            )
+            try:
+                result = await server.predict_from_base64_async(
+                    image_b64=request.image,
+                    instruction=request.instruction,
+                    state=request.state,
+                )
+            except Exception as _predict_exc:  # noqa: BLE001
+                # Circuit-breaker increment on raw exception. Re-raise so
+                # FastAPI returns 500; subsequent calls hit the degraded
+                # check above if the threshold trips.
+                _max = int(getattr(server, "max_consecutive_crashes", 5) or 0)
+                if _max > 0:
+                    server.consecutive_crash_count = int(
+                        getattr(server, "consecutive_crash_count", 0)
+                    ) + 1
+                    if server.consecutive_crash_count >= _max:
+                        server.health_state = "degraded"
+                        logger.error(
+                            "Server degraded after %d consecutive predict crashes "
+                            "(threshold=%d). /health returns 503; /act returns 503. "
+                            "Restart to clear.",
+                            server.consecutive_crash_count, _max,
+                        )
+                raise
+
+            # Circuit-breaker bookkeeping on returned result. Error-result
+            # responses (e.g., NaN guard trips) count as crashes; clean
+            # responses reset the counter to 0.
+            _max = int(getattr(server, "max_consecutive_crashes", 5) or 0)
+            if _max > 0:
+                if isinstance(result, dict) and "error" in result:
+                    server.consecutive_crash_count = int(
+                        getattr(server, "consecutive_crash_count", 0)
+                    ) + 1
+                    if server.consecutive_crash_count >= _max:
+                        server.health_state = "degraded"
+                        logger.error(
+                            "Server degraded after %d consecutive error responses "
+                            "(threshold=%d). /health returns 503; /act returns 503. "
+                            "Restart to clear.",
+                            server.consecutive_crash_count, _max,
+                        )
+                else:
+                    server.consecutive_crash_count = 0
+
             # Embodiment ActionGuard (B.6) — clamp actions against per-axis
             # ranges + velocity caps from embodiment config. NaN/Inf zeroes
             # the chunk + reports a violation. No-op when guard absent.
