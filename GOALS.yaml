@@ -656,6 +656,12 @@ goals:
     status: done
     weight: 8
 
+  - id: serve-dataset-validator
+    description: "`reflex validate-dataset <path>` — pre-flight validation of LeRobot v3.0 training datasets BEFORE customers spend Modal credits on a doomed training run. SHIPPED 2026-04-24 — 8 falsifiable checks: info-json-parseable, schema-completeness (action + observation.state), data-files-present, shape-consistency (action_dim parquet vs info.json — LeRobot Issue #2531 root cause), action-finite (NaN/Inf/None), embodiment-action-dim-match (when --embodiment passed), episode-count-matches, timing-monotonic. Reuses Check/CheckResult pattern from `reflex doctor` (D.1). Pyarrow optional (skips parquet checks gracefully when missing). JSON + human report formats. Exit codes 0 ok / 1 warn / 2 blocker; --strict escalates warns to blockers. ~440 LoC validation pkg + 95 LoC cli + 295 LoC tests (23 tests). Plan ref: features/01_serve/subfeatures/_dx_gaps/dataset-validator.md."
+    check: "test -d src/reflex/validation && grep -q 'validate-dataset' src/reflex/cli.py 2>/dev/null"
+    status: done
+    weight: 7
+
   - id: serve-prometheus-grafana
     description: "/metrics Prometheus endpoint + Grafana dashboard template (12 metrics: latency histogram, cache hit/miss counters, denoise steps, safety/SLO violations, fallback invocations, model swaps, in-flight gauge, episodes active, server up). SHIPPED 2026-04-24 (commit ad03d4b; +931 lines, 20 tests). Cardinality-bounded (90 series budget; source-grep test enforces no instruction/request_id/user_id/timestamp labels). dashboards/grafana_template.json schemaVersion 39 — 5 panels, templating vars for embodiment + model_id. /metrics route in server.py has no auth (operators network-isolate per plan). Downstream features (webhooks, slo-enforcement, guard, hot-swap) import from reflex.observability instead of defining their own metrics. Plan ref: features/01_serve/subfeatures/_ecosystem/prometheus-grafana_plan.md."
     check: "test -f src/reflex/observability/prometheus.py && test -f dashboards/grafana_template.json && python -c 'from reflex.observability import render_metrics; assert b\"reflex_act_latency_seconds\" in render_metrics()' 2>/dev/null"

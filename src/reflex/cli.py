@@ -1712,6 +1712,102 @@ def doctor(
             raise typer.Exit(code)
 
 
+@app.command(name="validate-dataset")
+def validate_dataset(
+    path: str = typer.Argument(help="Path to LeRobot v3.0 dataset root (contains meta/info.json)"),
+    embodiment: str = typer.Option(
+        "",
+        "--embodiment",
+        help="Embodiment preset (franka/so100/ur5) for cross-checking action_dim. "
+             "When set, loads configs/embodiments/<name>.json and compares its "
+             "action_dim against the dataset's declared action shape. Optional.",
+    ),
+    custom_embodiment_config: str = typer.Option(
+        "",
+        "--custom-embodiment-config",
+        help="Path to a custom embodiment config JSON. Overrides --embodiment.",
+    ),
+    output_format: str = typer.Option(
+        "human",
+        "--format",
+        help="Report format: 'human' (default, plain-text) or 'json' (machine-readable).",
+    ),
+    output: str = typer.Option(
+        "",
+        "--output",
+        help="Write the report to this file instead of stdout. Useful in CI.",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Treat WARN findings as BLOCKERs. Use in CI when any deviation should fail.",
+    ),
+):
+    """Validate a LeRobot training dataset against the model + embodiment expectations.
+
+    Pre-flight check before spending Modal credits on a training/distillation run that
+    would crash mid-way due to action-dim mismatch, NaN actions, or schema drift. Pairs
+    with `reflex doctor` (which validates model + runtime).
+
+    Exit codes: 0 ok, 1 warnings, 2 blockers (or warnings under --strict).
+
+    Examples:
+      reflex validate-dataset ~/datasets/aloha_sim
+      reflex validate-dataset ~/datasets/aloha_sim --embodiment franka
+      reflex validate-dataset ~/datasets/aloha_sim --format json --output report.json
+      reflex validate-dataset ~/datasets/aloha_sim --strict   # CI gating
+    """
+    from reflex.validation import (
+        Decision,
+        format_human,
+        format_json,
+        overall_decision,
+        run_all_checks,
+    )
+
+    if output_format not in ("human", "json"):
+        console.print(f"[red]--format must be 'human' or 'json', got {output_format!r}[/red]")
+        raise typer.Exit(2)
+
+    dataset_path = Path(path)
+    if not dataset_path.exists():
+        console.print(f"[red]Dataset path does not exist: {dataset_path}[/red]")
+        raise typer.Exit(2)
+
+    embodiment_cfg = None
+    if custom_embodiment_config or embodiment:
+        try:
+            from reflex.embodiments import EmbodimentConfig
+            if custom_embodiment_config:
+                embodiment_cfg = EmbodimentConfig.load_custom(custom_embodiment_config)
+            else:
+                embodiment_cfg = EmbodimentConfig.load_preset(embodiment)
+        except Exception as e:
+            console.print(f"[yellow]Could not load embodiment config: {e}[/yellow]")
+
+    results = run_all_checks(dataset_path, embodiment_config=embodiment_cfg, strict=strict)
+    decision = overall_decision(results, strict=strict)
+
+    if output_format == "json":
+        report = format_json(results, dataset_root=str(dataset_path), decision=decision)
+    else:
+        report = format_human(results, dataset_root=str(dataset_path))
+
+    if output:
+        Path(output).write_text(report)
+        console.print(f"Report written to {output} — decision: [bold]{decision.value.upper()}[/bold]")
+    else:
+        if output_format == "json":
+            console.print(report)
+        else:
+            console.print(report)
+            console.print(f"\nOverall decision: [bold]{decision.value.upper()}[/bold]")
+
+    exit_code = {Decision.OK: 0, Decision.WARN: 1, Decision.BLOCKER: 2, Decision.SKIPPED: 0}[decision]
+    if exit_code != 0:
+        raise typer.Exit(exit_code)
+
+
 # Register `reflex finetune` + `reflex distill` subcommands. Lazy-import
 # protects users who don't have training deps installed — they only break
 # if they run the commands themselves.
