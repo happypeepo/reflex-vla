@@ -591,6 +591,27 @@ def benchmark_cmd(
     episodes_per_task: int = typer.Option(
         10, help="Episodes per task for --benchmark (full suites use 50)"
     ),
+    report: str = typer.Option(
+        "",
+        "--report",
+        help="When set, write a methodology-rich Markdown bench report to this path. "
+             "Includes p50/p95/p99 + p99.9 + jitter + 95%% CI + reproducibility envelope "
+             "(git SHA, GPU, ORT/CUDA versions, ONNX file hashes, seed). Lifts ISB-1 "
+             "methodology — see reference/NOTES.md sibling project section.",
+    ),
+    report_json: str = typer.Option(
+        "",
+        "--report-json",
+        help="Same data as --report but as machine-readable JSON. Stable schema; "
+             "CI can grep results without parsing markdown.",
+    ),
+    seed: int = typer.Option(
+        0,
+        "--seed",
+        help="RNG seed pinned in the reproducibility envelope. Inference is "
+             "deterministic at the noise initialization layer; pinning here lets "
+             "you cite a number that re-runs identically.",
+    ),
     verbose: bool = typer.Option(False, help="Verbose logging"),
 ):
     """Benchmark exported model — latency (default) and optional task success.
@@ -699,6 +720,38 @@ def benchmark_cmd(
             "  [yellow]Note: requested device=cuda but ended up on CPU. "
             "Install onnxruntime-gpu and CUDA 12 + cuDNN 9 for GPU performance.[/yellow]"
         )
+
+    # Methodology-rich report (Phase 1 bench-revamp). Backward-compat: only
+    # writes a report when --report or --report-json is set; the printed
+    # table above is the existing one-shot UX.
+    if report or report_json:
+        from reflex.bench import (
+            BenchReport,
+            capture_environment,
+            compute_stats,
+        )
+        # Re-include the warmup samples so methodology.compute_stats can
+        # discard them for documentation symmetry. The existing latencies
+        # list contains ONLY post-warmup samples, so warmup_n=0 here.
+        stats = compute_stats(latencies, warmup_n=0)
+        env = capture_environment(
+            export_dir=export_dir,
+            device=device,
+            inference_mode=server._inference_mode,
+            seed=seed,
+        )
+        bench_report = BenchReport(
+            stats=stats,
+            environment=env,
+            notes=[f"warmup={warmup} discarded BEFORE the recorded latencies "
+                   f"(see iterations loop in cli.benchmark_cmd)"],
+        )
+        if report:
+            bench_report.write_markdown(report)
+            console.print(f"\n  [dim]Markdown report:[/dim] {report}")
+        if report_json:
+            bench_report.write_json(report_json)
+            console.print(f"  [dim]JSON report:[/dim] {report_json}")
 
     # Task-success evaluation (optional, gated on --benchmark flag + [eval] extra)
     if benchmark:

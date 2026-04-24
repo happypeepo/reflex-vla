@@ -686,6 +686,12 @@ goals:
     status: done
     weight: 9
 
+  - id: serve-bench-revamp
+    description: "`reflex inspect bench --report bench.md` — methodology-rich latency report with reproducibility envelope. SHIPPED 2026-04-24 as the first Phase 1 ship. ISB-1 methodology lifted from EasyInference sibling project (warmup discard, p50/p95/p99/p99.9 + tail, jitter as std/mean, 95% CI normal-approx). Reproducibility envelope: git SHA + dirty flag, GPU name (nvidia-smi), CUDA version, ORT version, per-ONNX-file SHA256, seed, device, inference_mode. Markdown + JSON output (stable schema_version=1; CI-friendly). Backward compat: existing one-shot table UX preserved when --report flags omitted. ~375 LoC bench package + 35 LoC cli wiring + 280 LoC tests (27 tests). Pattern source documented in reflex-vla/reference/NOTES.md sibling-project section. Plan ref: features/01_serve/subfeatures/_dx_gaps/bench-revamp.md."
+    check: "test -d src/reflex/bench && python -c 'from reflex.bench import compute_stats, BenchReport, capture_environment' 2>/dev/null"
+    status: done
+    weight: 8
+
   - id: serve-prometheus-grafana
     description: "/metrics Prometheus endpoint + Grafana dashboard template (12 metrics: latency histogram, cache hit/miss counters, denoise steps, safety/SLO violations, fallback invocations, model swaps, in-flight gauge, episodes active, server up). SHIPPED 2026-04-24 (commit ad03d4b; +931 lines, 20 tests). Cardinality-bounded (90 series budget; source-grep test enforces no instruction/request_id/user_id/timestamp labels). dashboards/grafana_template.json schemaVersion 39 — 5 panels, templating vars for embodiment + model_id. /metrics route in server.py has no auth (operators network-isolate per plan). Downstream features (webhooks, slo-enforcement, guard, hot-swap) import from reflex.observability instead of defining their own metrics. Plan ref: features/01_serve/subfeatures/_ecosystem/prometheus-grafana_plan.md."
     check: "test -f src/reflex/observability/prometheus.py && test -f dashboards/grafana_template.json && python -c 'from reflex.observability import render_metrics; assert b\"reflex_act_latency_seconds\" in render_metrics()' 2>/dev/null"
