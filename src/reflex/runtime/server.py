@@ -1043,6 +1043,7 @@ def create_app(
     max_consecutive_crashes: int = 5,
     slo_tracker: Any = None,  # reflex.runtime.slo.SLOTracker
     slo_mode: str = "degrade",  # "log_only" | "503" | "degrade"
+    max_concurrent: int | None = None,  # None = no limit; int → 429 when saturated
 ) -> Any:
     """Create a FastAPI app for serving VLA predictions.
 
@@ -1364,21 +1365,31 @@ def create_app(
         lifespan=lifespan,
     )
 
-    # X-Reflex-Key authentication dependency.
-    # If api_key is set at app-creation time, every route that uses this
-    # dependency requires the caller to pass a matching `X-Reflex-Key`
-    # header. Missing or wrong → 401. /health skips it so load balancers
-    # and orchestrators can probe readiness without credentials.
+    # Bearer auth dependency (Phase 1 auth-bearer feature).
+    # If api_key is set at app-creation time, every protected route requires
+    # the caller to pass `Authorization: Bearer <token>` (preferred) OR the
+    # legacy `X-Reflex-Key` header (back-compat). Token comparison is constant-
+    # time to resist timing attacks. /health skips auth so load balancers /
+    # orchestrators can probe readiness without credentials.
+    from reflex.runtime.auth import (
+        constant_time_token_match,
+        make_401_payload,
+        resolve_request_token,
+    )
+
     async def _require_api_key(
+        authorization: str | None = Header(default=None),
         x_reflex_key: str | None = Header(default=None, alias="X-Reflex-Key"),
     ) -> None:
         if api_key is None:
             return
-        if not x_reflex_key or x_reflex_key != api_key:
-            raise HTTPException(
-                status_code=401,
-                detail="missing or invalid X-Reflex-Key header",
+        provided = resolve_request_token(authorization, x_reflex_key)
+        if not constant_time_token_match(provided, api_key):
+            err = make_401_payload(
+                "missing or invalid credentials — supply 'Authorization: Bearer <token>' "
+                "or 'X-Reflex-Key' header"
             )
+            raise HTTPException(status_code=401, detail=err.to_dict())
 
     @app.get("/health")
     async def health():
@@ -1677,6 +1688,32 @@ def create_app(
     # (MCP server, future dashboards, test harnesses) can access the same
     # inference engine without recreating it. Per mcp-server Phase 1 wiring.
     app.state.reflex_server = server
+
+    # Concurrency limiter middleware (Phase 1 auth-bearer feature).
+    # When max_concurrent is set, a semaphore bounds in-flight /act requests;
+    # overload returns HTTP 429 + Retry-After (not slow-down). /health is
+    # exempt so liveness probes bypass the limit. TGI's overload pattern.
+    if max_concurrent is not None and max_concurrent > 0:
+        from reflex.runtime.auth import ConcurrencyLimiter, make_429_payload
+        _concurrency_limiter = ConcurrencyLimiter(max_concurrent=max_concurrent)
+        app.state.concurrency_limiter = _concurrency_limiter
+
+        @app.middleware("http")
+        async def _concurrency_middleware(request, call_next):
+            # Don't rate-limit liveness probes or metrics scrapes
+            if request.url.path in ("/health", "/healthz", "/metrics"):
+                return await call_next(request)
+            async with _concurrency_limiter.try_acquire() as ctx:
+                if not ctx.acquired:
+                    return JSONResponse(
+                        status_code=429,
+                        headers={"Retry-After": "1"},
+                        content=make_429_payload(
+                            current=_concurrency_limiter.in_flight,
+                            limit=_concurrency_limiter.max_concurrent,
+                        ),
+                    )
+                return await call_next(request)
 
     # SLO enforcement middleware (Phase 1 latency-slo-enforcement feature).
     # Measures /act latency, computes rolling p99, and reacts per slo_mode:

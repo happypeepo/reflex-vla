@@ -1025,6 +1025,16 @@ def serve(
              "exclusive with the HTTP flags above (port, host, api-key, "
              "max-batch, etc. are ignored in ROS2 mode).",
     ),
+    max_concurrent: int = typer.Option(
+        0,
+        "--max-concurrent",
+        help="Maximum concurrent /act requests. 0 = unlimited (default). When "
+             "set to N, a semaphore bounds in-flight requests; overload returns "
+             "HTTP 429 with structured {error, message, request_id, "
+             "concurrent_requests, max_concurrent} body + Retry-After: 1 header. "
+             "TGI's overload pattern: reject fast, let client retry, don't let "
+             "queue depth explode. /health + /metrics are exempt.",
+    ),
     slo: str = typer.Option(
         "",
         "--slo",
@@ -1305,6 +1315,7 @@ def serve(
         max_consecutive_crashes=max_consecutive_crashes,
         slo_tracker=slo_tracker,
         slo_mode=_slo_mode_validated,
+        max_concurrent=max_concurrent if max_concurrent > 0 else None,
     )
     if api_key:
         composed.append("[cyan]api-key-auth[/cyan]")
