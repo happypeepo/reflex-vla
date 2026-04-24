@@ -616,8 +616,9 @@ goals:
     weight: 7
 
   - id: serve-reflex-doctor
-    description: "`reflex doctor` CLI command — 10 falsifiable checks mapped to LeRobot GitHub issues: (1) model load OOM #386/#414, (2) ONNX provider unavailable #2137, (3) VLM tokenization errors #2119/#683, (4) image dim mismatch #1700, (5) action denormalization #414/#2210, (6) gripper config inverted #2210/#2531, (7) state deserialization #2458, (8) GPU memory > capacity, (9) async RTC chunk boundary #2356/#2531, (10) CUDA/cuDNN version compat. HIGH-ROI first-deploy UX per round-2 customer voice. 2-3 days + doctor→error→doc-URL registry. Plan ref: serve_technical_plan_v3.md §4.4."
-    check: "test -f src/reflex/cli/doctor.py 2>/dev/null && grep -q 'reflex doctor\\|cmd_doctor' src/reflex/cli.py 2>/dev/null"
+    description: "`reflex doctor` CLI command — 10 falsifiable checks mapped to LeRobot GitHub issues: (1) model load OOM #386/#414, (2) ONNX provider unavailable #2137, (3) VLM tokenization errors #2119/#683, (4) image dim mismatch #1700, (5) action denormalization #414/#2210, (6) gripper config inverted #2210/#2531, (7) state deserialization #2458, (8) GPU memory > capacity #2137, (9) async RTC chunk boundary #2356/#2531, (10) CUDA/cuDNN version compat. SHIPPED 2026-04-24 across 2 commits (033536f Day 1 + b7cfe17 Day 2; 2378 lines, 39 tests, 0 flakes). All 10 checks register + run; falsifiability gate enforced via CheckResult.__post_init__. Frozen check spec at docs/doctor_check_list.md, draft-07 JSON Schema at docs/doctor_output_schema.json. CLI integrated into existing `reflex doctor` command (with optional --model/--embodiment/--rtc/--format/--skip flags). HIGH-ROI first-deploy UX per round-2 customer voice."
+    check: "test -d src/reflex/diagnostics && python -c 'from reflex.diagnostics import run_all_checks; r = run_all_checks(\"/tmp\", \"custom\"); assert len(r) == 10' 2>/dev/null"
+    status: done
     weight: 7
 
   # ── PLAN V3 ADDITIONS (added 2026-04-22 after serve_technical_plan_v3) ──
