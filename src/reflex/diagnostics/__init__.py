@@ -135,6 +135,9 @@ def _ensure_registry_loaded() -> None:
         check_hardware_compat,
         check_state_proprio,
     )
+    # Phase 1 cuda-graphs check — added 2026-04-24 per ADR
+    # 2026-04-24-cuda-graphs-architecture (surfaces A10G tier-aware semantics)
+    from . import check_cuda_graphs  # noqa: F401
 
 
 def run_all_checks(
