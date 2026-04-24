@@ -4,17 +4,21 @@ Implements Real-Time Chunking (arxiv 2506.07339) so the robot keeps executing
 the tail of one chunk while the next chunk is being computed. Net: 2-3x
 effective throughput on high-latency deployments (Jetson-class).
 
-Status: SKELETON. Class signatures + docstrings shipped. Logic gated on open
-design questions tracked in ``reflex_context/04_product/rtc_lerobot_design_review.md``.
-Do not import from production code until items marked ``# TODO(rtc)`` resolve.
+Status: Day 1+2 of B.3 sprint shipped (construction + predict body).
+Day 3 wires prev_chunk_left_over carry-forward; Day 4 integrates with
+ReflexServer's /act handler. Body methods do real work but assume the
+underlying policy supports the lerobot RTC kwargs (inference_delay,
+prev_chunk_left_over) — true for decomposed exports with Python denoise
+loops; monolithic ONNX (loop baked in) ignores the kwargs silently.
 
 Design: ``reflex_context/reference/deep_dive_lerobot_rtc.md``
-Plan ref: ``reflex_context/04_product/serve_technical_plan_v3.md`` §2.1
+Plan ref: ``reflex_context/features/01_serve/subfeatures/_rtc_a2c2/rtc-adapter_plan.md``
 Goal: ``serve-rtc-wrapper`` (GOALS.yaml, weight 10)
 """
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -254,18 +258,61 @@ class RtcAdapter:
         """Run one inference with RTC guidance applied.
 
         Steps:
-        1. Get latency estimate from tracker → scheduler input
-        2. Call policy.predict_action_chunk(**batch) → raw action chunk
-        3. Pass through lerobot.RTCProcessor for guidance correction
-        4. Return denormalized chunk ready for ActionChunkBuffer.push
+        1. Estimate p95 latency from the tracker
+        2. Compute actions_consumed = int(latency_s * config.execute_hz)
+           — how many actions of the previous chunk the robot has already
+           executed by the time this inference completes
+        3. Call policy.predict_action_chunk(**batch, inference_delay=N,
+           prev_chunk_left_over=...) — the policy is responsible for
+           applying RTC guidance via lerobot.policies.rtc.RTCProcessor
+           inside its denoising loop (decomposed exports with Python loops
+           support this; monolithic ONNX ignores the kwargs silently)
+        4. Record elapsed wall-clock on the latency tracker so the next
+           call has a fresh estimate
+        5. Return the chunk unchanged (denormalization happens inside the
+           policy's postprocessor)
 
-        TODO(rtc): implement steps 1-4 after Part A (all 4 questions) resolves
-        from design review.
+        Day 2 scope: prev_chunk_left_over is always None (first-chunk
+        behavior). Day 3 wires the carry-forward from
+        ``self._prev_chunk_left_over`` (set by ``merge_and_update``).
         """
-        raise NotImplementedError(
-            "RtcAdapter.predict_chunk_with_rtc: pending Part A design review. "
-            "See reflex_context/04_product/rtc_lerobot_design_review.md"
+        # Step 1+2: latency → actions_consumed
+        latency_s = self.latency.estimate()
+        actions_consumed = int(latency_s * self.config.execute_hz)
+        logger.debug(
+            "[rtc] predict — latency p%d=%.3fs → %d actions consumed",
+            self.config.latency_percentile, latency_s, actions_consumed,
         )
+
+        # Step 3: call policy with RTC kwargs
+        # `inference_delay` and `prev_chunk_left_over` are the lerobot
+        # RTC contract (see RTCProcessor.denoise_step). Day 2 always
+        # passes prev_chunk_left_over=None.
+        rtc_kwargs: dict[str, Any] = {
+            "inference_delay": actions_consumed,
+            "prev_chunk_left_over": None,  # Day 3 wires carry-forward
+        }
+        if self.config.enabled:
+            rtc_kwargs["execution_horizon"] = self.config.rtc_execution_horizon
+
+        t0 = time.monotonic()
+        try:
+            actions = self.policy.predict_action_chunk(**batch, **rtc_kwargs)
+        except TypeError:
+            # Policy doesn't accept RTC kwargs — fall back to plain call.
+            # Useful for monolithic-ONNX policies whose forward doesn't
+            # take inference_delay. The chunk we get back is the same
+            # shape; RTC simply has no effect on this call.
+            logger.debug(
+                "[rtc] policy rejected RTC kwargs — falling back to plain call"
+            )
+            actions = self.policy.predict_action_chunk(**batch)
+        elapsed_s = time.monotonic() - t0
+
+        # Step 4: feed the latency tracker
+        self.latency.record(elapsed_s)
+
+        return actions
 
     def merge_and_update(
         self,
