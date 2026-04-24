@@ -30,9 +30,12 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence, Union
+
+import numpy as np
 
 from reflex.observability.prometheus import (
+    inc_cuda_graph_capture_failed_at_init,
     inc_cuda_graph_captured,
     inc_cuda_graph_eager_fallback,
     inc_cuda_graph_replayed,
@@ -44,6 +47,17 @@ if TYPE_CHECKING:
     import onnxruntime as ort  # pragma: no cover
 
 logger = logging.getLogger(__name__)
+
+
+_ORT_TO_NUMPY_DTYPE = {
+    "tensor(float)": np.float32,
+    "tensor(float16)": np.float16,
+    "tensor(double)": np.float64,
+    "tensor(int64)": np.int64,
+    "tensor(int32)": np.int32,
+    "tensor(uint8)": np.uint8,
+    "tensor(bool)": np.bool_,
+}
 
 
 # Bounded enum of session names — matches the Prometheus label vocabulary.
@@ -229,3 +243,158 @@ class CudaGraphWrapper:
             self._model_id,
             self._embodiment,
         )
+
+
+class EagerSessionWrapper:
+    """Transparent wrapper around an eager ORT session that exposes the same
+    `.run()` / `.session` / `.captured` / `.invalidate()` API as CudaGraphWrapper.
+
+    Returned by `try_capture_or_fall_back()` when cuda-graph capture fails at
+    init time (e.g., OOM on A10G's 24 GB envelope for vlm_prefix). Callers
+    don't have to branch on wrapper type — both respond to the same surface.
+
+    `.captured` always returns False; `.invalidate()` is a no-op (there's no
+    captured graph to invalidate).
+    """
+
+    __slots__ = ("_session", "_session_name", "_embodiment", "_model_id")
+
+    def __init__(
+        self,
+        session: "ort.InferenceSession",
+        session_name: str,
+        embodiment: str,
+        model_id: str,
+    ):
+        if session_name not in VALID_SESSION_NAMES:
+            raise ValueError(
+                f"session_name must be one of {sorted(VALID_SESSION_NAMES)}, got {session_name!r}"
+            )
+        self._session = session
+        self._session_name = session_name
+        self._embodiment = embodiment
+        self._model_id = model_id
+
+    @property
+    def session(self) -> "ort.InferenceSession":
+        return self._session
+
+    @property
+    def captured(self) -> bool:
+        return False
+
+    def run(
+        self,
+        output_names: Sequence[str] | None,
+        input_feed: Mapping[str, Any],
+    ) -> list:
+        return self._session.run(output_names, input_feed)
+
+    def invalidate(self) -> None:
+        pass  # no captured graph to invalidate
+
+
+def _make_probe_feed(session: "ort.InferenceSession", seed: int = 0) -> dict[str, Any]:
+    """Generate a synthetic feed dict matching `session`'s declared input
+    names + shapes + dtypes. Used by `try_capture_or_fall_back()` to probe
+    whether the session can capture without waiting for a real request.
+
+    Any dynamic dim (None or symbolic) defaults to 1. Reflex's decomposed
+    exports are static-shape per ADR 2026-04-21, so dynamic dims should not
+    appear in practice.
+    """
+    rng = np.random.default_rng(seed)
+    feed: dict[str, Any] = {}
+    for inp in session.get_inputs():
+        shape = [1 if (isinstance(d, str) or d is None) else int(d) for d in inp.shape]
+        dtype = _ORT_TO_NUMPY_DTYPE.get(inp.type, np.float32)
+        if np.issubdtype(dtype, np.floating):
+            feed[inp.name] = rng.standard_normal(shape).astype(dtype)
+        elif dtype == np.bool_:
+            feed[inp.name] = (rng.integers(0, 2, size=shape) > 0)
+        else:
+            feed[inp.name] = rng.integers(0, 100, size=shape, dtype=dtype)
+    return feed
+
+
+def try_capture_or_fall_back(
+    session_factory: Callable[[bool], "ort.InferenceSession"],
+    session_name: str,
+    embodiment: str,
+    model_id: str,
+    probe_feed: Mapping[str, Any] | None = None,
+) -> Union[CudaGraphWrapper, EagerSessionWrapper]:
+    """Build a session with cuda_graph=True and probe-capture it via a synthetic
+    forward. On success return a CudaGraphWrapper wrapping the captured session.
+    On capture failure (OOM, unsupported op, etc.), emit a
+    `reflex_cuda_graph_capture_failed_at_init_total` metric, then rebuild the
+    session with cuda_graph=False and return an EagerSessionWrapper.
+
+    Used for graceful-degrade on hardware tiers where some sessions cannot
+    capture due to memory constraints (e.g., A10G 24 GB for `vlm_prefix`).
+    Distinct from in-request eager fallback (which uses
+    `reflex_cuda_graph_eager_fallback_total` for replay-time failures).
+
+    Per ADR 2026-04-24-cuda-graphs-architecture decision #5 (post-spike
+    refinement): Phase 1 ships tier-aware semantics — A100+ gets both
+    sessions captured; A10G gets expert_denoise captured + vlm_prefix
+    gracefully degraded to eager (surfaced via metric, not silent).
+
+    Args:
+        session_factory: Callable that takes `cuda_graphs_enabled: bool` and
+            returns an `ort.InferenceSession`. Same factory is invoked twice
+            on the capture-failure path (once with True, once with False),
+            so it should be idempotent.
+        session_name: "vlm_prefix" or "expert_denoise".
+        embodiment: Prometheus label (e.g., "franka" / "so100" / "ur5").
+        model_id: Prometheus label (e.g., "pi05-decomposed-libero").
+        probe_feed: Optional explicit synthetic feed. If None, one is generated
+            from the session's `get_inputs()` metadata.
+
+    Returns:
+        CudaGraphWrapper on capture success, EagerSessionWrapper on failure.
+        Both expose the same `.run()` API so callers don't branch on type.
+    """
+    try:
+        cg_session = session_factory(True)
+        feed = probe_feed if probe_feed is not None else _make_probe_feed(cg_session)
+        t0 = time.perf_counter()
+        _ = cg_session.run(None, feed)
+        elapsed = time.perf_counter() - t0
+    except Exception as exc:
+        logger.warning(
+            "cuda_graph.capture_failed_at_init session=%s model=%s embodiment=%s "
+            "reason=%s: %s — falling back to eager session for this process lifetime",
+            session_name, model_id, embodiment, type(exc).__name__, exc,
+        )
+        inc_cuda_graph_capture_failed_at_init(
+            embodiment=embodiment, model_id=model_id,
+            session=session_name, reason=type(exc).__name__,
+        )
+        eager_session = session_factory(False)
+        return EagerSessionWrapper(
+            eager_session,
+            session_name=session_name,
+            embodiment=embodiment,
+            model_id=model_id,
+        )
+
+    # Capture succeeded. Wrap + record metrics as if this were the first .run().
+    wrapper = CudaGraphWrapper(
+        cg_session,
+        session_name=session_name,
+        embodiment=embodiment,
+        model_id=model_id,
+    )
+    wrapper._captured = True  # mark captured so subsequent .run()s go through replay path
+    observe_cuda_graph_capture_seconds(
+        embodiment=embodiment, session=session_name, seconds=elapsed,
+    )
+    inc_cuda_graph_captured(
+        embodiment=embodiment, model_id=model_id, session=session_name,
+    )
+    logger.info(
+        "cuda_graph.captured_at_init session=%s model=%s embodiment=%s elapsed_ms=%.1f",
+        session_name, model_id, embodiment, elapsed * 1000,
+    )
+    return wrapper

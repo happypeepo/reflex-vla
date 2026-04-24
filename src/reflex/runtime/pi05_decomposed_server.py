@@ -236,66 +236,99 @@ class Pi05DecomposedInference:
         logger.info("ONNXRuntime device: %s", ort.get_device())
         logger.info("requested providers: %s", self._providers)
 
-        logger.info("loading vlm_prefix: %s", prefix_path)
-        _raw_prefix = ort.InferenceSession(str(prefix_path), providers=self._providers)
-        self._prefix_input_names = [i.name for i in _raw_prefix.get_inputs()]
-        self._prefix_output_names = [o.name for o in _raw_prefix.get_outputs()]
-        actual_prefix = _raw_prefix.get_providers()
-        logger.info("vlm_prefix actual providers: %s", actual_prefix)
-        # When cuda_graphs_enabled: hard-fail if the CUDA EP didn't actually load
-        # (otherwise we'd silently capture CPU kernels into a useless graph).
-        # When disabled: retain the legacy warning-on-silent-fallback behavior.
+        # When cuda_graphs_enabled: use try_capture_or_fall_back() per session.
+        # This probes capture at init time. On success → CudaGraphWrapper wrapping
+        # the captured session. On failure (e.g., OOM on A10G for vlm_prefix) →
+        # EagerSessionWrapper wrapping a fresh eager session, with a
+        # capture_failed_at_init metric + warning log. Expert_denoise still
+        # captures cleanly on both A10G + A100; vlm_prefix captures on A100+
+        # only (per ADR 2026-04-24 Day-0 spike findings).
         cuda_required = self._providers[0] == "CUDAExecutionProvider" or (
             isinstance(self._providers[0], tuple) and self._providers[0][0] == "CUDAExecutionProvider"
         )
-        if cuda_required and "CUDAExecutionProvider" not in actual_prefix:
-            msg = (
-                f"CUDAExecutionProvider requested but NOT active for vlm_prefix "
-                f"(actual={actual_prefix}). Check that onnxruntime-gpu + cuDNN + cuBLAS + "
-                f"cudart + curand + cufft + cusparse + cusolver + nvrtc libs are in "
-                f"LD_LIBRARY_PATH."
-            )
-            if cuda_graphs_enabled:
-                raise RuntimeError(f"cuda_graphs_enabled=True but {msg}")
-            logger.warning(msg)
 
-        logger.info("loading expert_denoise: %s", expert_path)
-        _raw_expert = ort.InferenceSession(str(expert_path), providers=self._providers)
-        self._expert_input_names = [i.name for i in _raw_expert.get_inputs()]
-        actual_expert = _raw_expert.get_providers()
-        logger.info("expert_denoise actual providers: %s", actual_expert)
-        if cuda_required and "CUDAExecutionProvider" not in actual_expert and cuda_graphs_enabled:
-            raise RuntimeError(
-                f"cuda_graphs_enabled=True but CUDAExecutionProvider NOT active for "
-                f"expert_denoise (actual={actual_expert})"
-            )
-
-        # Wrap sessions with CudaGraphWrapper when cuda-graphs is enabled.
-        # The wrapper preserves the .run() signature so call sites at
-        # _get_or_run_prefix (line ~498) and expert dispatch (line ~358)
-        # work unchanged.
         if cuda_graphs_enabled:
-            from reflex.runtime.cuda_graphs import CudaGraphWrapper
-            self._sess_prefix = CudaGraphWrapper(
-                _raw_prefix,
+            from reflex.runtime.cuda_graphs import (
+                build_cuda_graph_providers,
+                try_capture_or_fall_back,
+            )
+
+            def _build_prefix_session(cg_enabled: bool) -> ort.InferenceSession:
+                return ort.InferenceSession(
+                    str(prefix_path),
+                    providers=build_cuda_graph_providers(enabled=cg_enabled),
+                )
+
+            def _build_expert_session(cg_enabled: bool) -> ort.InferenceSession:
+                return ort.InferenceSession(
+                    str(expert_path),
+                    providers=build_cuda_graph_providers(enabled=cg_enabled),
+                )
+
+            logger.info("loading vlm_prefix with capture probe: %s", prefix_path)
+            self._sess_prefix = try_capture_or_fall_back(
+                _build_prefix_session,
                 session_name="vlm_prefix",
                 embodiment=cuda_graphs_embodiment,
                 model_id=cuda_graphs_model_id,
             )
-            self._sess_expert = CudaGraphWrapper(
-                _raw_expert,
+            _raw_prefix = self._sess_prefix.session
+            actual_prefix = _raw_prefix.get_providers()
+            logger.info("vlm_prefix actual providers: %s", actual_prefix)
+            if cuda_required and "CUDAExecutionProvider" not in actual_prefix:
+                raise RuntimeError(
+                    f"cuda_graphs_enabled=True but CUDAExecutionProvider NOT active "
+                    f"for vlm_prefix (actual={actual_prefix}). Check onnxruntime-gpu + "
+                    f"cuDNN + cuBLAS libs in LD_LIBRARY_PATH."
+                )
+
+            logger.info("loading expert_denoise with capture probe: %s", expert_path)
+            self._sess_expert = try_capture_or_fall_back(
+                _build_expert_session,
                 session_name="expert_denoise",
                 embodiment=cuda_graphs_embodiment,
                 model_id=cuda_graphs_model_id,
             )
+            _raw_expert = self._sess_expert.session
+            actual_expert = _raw_expert.get_providers()
+            logger.info("expert_denoise actual providers: %s", actual_expert)
+            if cuda_required and "CUDAExecutionProvider" not in actual_expert:
+                raise RuntimeError(
+                    f"cuda_graphs_enabled=True but CUDAExecutionProvider NOT active "
+                    f"for expert_denoise (actual={actual_expert})"
+                )
+
             logger.info(
-                "cuda-graphs enabled for Pi05DecomposedInference "
+                "cuda-graphs enabled: vlm_prefix.captured=%s, expert_denoise.captured=%s "
                 "(embodiment=%s, model_id=%s)",
+                self._sess_prefix.captured, self._sess_expert.captured,
                 cuda_graphs_embodiment, cuda_graphs_model_id,
             )
         else:
+            logger.info("loading vlm_prefix: %s", prefix_path)
+            _raw_prefix = ort.InferenceSession(str(prefix_path), providers=self._providers)
+            actual_prefix = _raw_prefix.get_providers()
+            logger.info("vlm_prefix actual providers: %s", actual_prefix)
+            if cuda_required and "CUDAExecutionProvider" not in actual_prefix:
+                logger.warning(
+                    "CUDAExecutionProvider requested but NOT active for vlm_prefix "
+                    "(actual=%s). Check onnxruntime-gpu + cuDNN + cuBLAS libs in "
+                    "LD_LIBRARY_PATH.",
+                    actual_prefix,
+                )
             self._sess_prefix = _raw_prefix
+
+            logger.info("loading expert_denoise: %s", expert_path)
+            _raw_expert = ort.InferenceSession(str(expert_path), providers=self._providers)
+            actual_expert = _raw_expert.get_providers()
+            logger.info("expert_denoise actual providers: %s", actual_expert)
             self._sess_expert = _raw_expert
+
+        # Capture input/output name metadata from the underlying session
+        # (works for both raw sessions and wrapped sessions).
+        self._prefix_input_names = [i.name for i in _raw_prefix.get_inputs()]
+        self._prefix_output_names = [o.name for o in _raw_prefix.get_outputs()]
+        self._expert_input_names = [i.name for i in _raw_expert.get_inputs()]
 
         self._cache: CacheEntry | None = None
         self._stats = CacheStats()

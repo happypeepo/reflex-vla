@@ -255,6 +255,19 @@ reflex_cuda_graph_eager_fallback_total = Counter(
     registry=REGISTRY,
 )
 
+# Distinct from eager_fallback_total: this fires ONCE per session when init-time
+# capture fails (e.g., OOM on A10G's limited memory) and we fall back to an
+# eager-only session for the rest of the process. Separated so operators can
+# distinguish "this hardware can't capture at all" from "in-flight replay
+# failed on a request."
+reflex_cuda_graph_capture_failed_at_init_total = Counter(
+    "reflex_cuda_graph_capture_failed_at_init_total",
+    "Capture failures at session-init time (hardware can't capture this session; "
+    "falls back to eager for the process lifetime)",
+    labelnames=("embodiment", "model_id", "session", "reason"),
+    registry=REGISTRY,
+)
+
 # Capture is a first-time cost: ~50-200ms on small sessions, up to multi-second
 # on a full decomposed vlm_prefix. Buckets span that range.
 _CUDA_GRAPH_CAPTURE_BUCKETS = (0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0)
@@ -293,6 +306,14 @@ def inc_cuda_graph_replayed(embodiment: str, model_id: str, session: str) -> Non
 def inc_cuda_graph_eager_fallback(embodiment: str, model_id: str, reason: str) -> None:
     reflex_cuda_graph_eager_fallback_total.labels(
         embodiment=embodiment, model_id=model_id, reason=reason
+    ).inc()
+
+
+def inc_cuda_graph_capture_failed_at_init(
+    embodiment: str, model_id: str, session: str, reason: str
+) -> None:
+    reflex_cuda_graph_capture_failed_at_init_total.labels(
+        embodiment=embodiment, model_id=model_id, session=session, reason=reason
     ).inc()
 
 

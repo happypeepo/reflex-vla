@@ -13,6 +13,7 @@ import pytest
 
 from reflex.observability.prometheus import (
     REGISTRY,
+    reflex_cuda_graph_capture_failed_at_init_total,
     reflex_cuda_graph_captured_total,
     reflex_cuda_graph_eager_fallback_total,
     reflex_cuda_graph_replayed_total,
@@ -20,7 +21,9 @@ from reflex.observability.prometheus import (
 from reflex.runtime.cuda_graphs import (
     VALID_SESSION_NAMES,
     CudaGraphWrapper,
+    EagerSessionWrapper,
     build_cuda_graph_providers,
+    try_capture_or_fall_back,
 )
 
 
@@ -230,3 +233,132 @@ def test_session_property_exposes_raw_session():
     mock_sess = MagicMock()
     w = CudaGraphWrapper(mock_sess, "vlm_prefix", embodiment="franka", model_id="cg-test-7")
     assert w.session is mock_sess
+
+
+# ---------------------------------------------------------------------------
+# EagerSessionWrapper
+# ---------------------------------------------------------------------------
+
+def test_eager_session_wrapper_captured_is_false():
+    mock_sess = MagicMock()
+    w = EagerSessionWrapper(mock_sess, "vlm_prefix", embodiment="franka", model_id="cg-eager-1")
+    assert w.captured is False
+    assert w.session is mock_sess
+
+
+def test_eager_session_wrapper_run_forwards_to_session():
+    mock_sess = MagicMock()
+    mock_sess.run.return_value = ["out"]
+    w = EagerSessionWrapper(mock_sess, "expert_denoise", embodiment="franka", model_id="cg-eager-2")
+    result = w.run(None, {"x": [1]})
+    assert result == ["out"]
+    mock_sess.run.assert_called_with(None, {"x": [1]})
+
+
+def test_eager_session_wrapper_invalidate_is_noop():
+    mock_sess = MagicMock()
+    w = EagerSessionWrapper(mock_sess, "vlm_prefix", embodiment="franka", model_id="cg-eager-3")
+    w.invalidate()  # no-op, doesn't raise
+    assert w.captured is False
+
+
+def test_eager_session_wrapper_rejects_invalid_session_name():
+    mock_sess = MagicMock()
+    with pytest.raises(ValueError, match="session_name"):
+        EagerSessionWrapper(mock_sess, "bogus", embodiment="franka", model_id="m1")
+
+
+# ---------------------------------------------------------------------------
+# try_capture_or_fall_back
+# ---------------------------------------------------------------------------
+
+def _make_mock_session_with_inputs():
+    """Mock ORT session that responds to get_inputs() with one float input."""
+    mock_sess = MagicMock()
+    mock_input = MagicMock()
+    mock_input.name = "x"
+    mock_input.shape = [1, 4]
+    mock_input.type = "tensor(float)"
+    mock_sess.get_inputs.return_value = [mock_input]
+    return mock_sess
+
+
+def test_try_capture_returns_cuda_graph_wrapper_on_success():
+    mock_sess = _make_mock_session_with_inputs()
+    mock_sess.run.return_value = ["captured_output"]
+
+    def factory(cg_enabled):
+        return mock_sess
+
+    result = try_capture_or_fall_back(
+        factory, session_name="expert_denoise",
+        embodiment="franka", model_id="cg-try-1",
+    )
+    assert isinstance(result, CudaGraphWrapper)
+    assert result.captured is True
+    assert result.session is mock_sess
+
+
+def test_try_capture_returns_eager_wrapper_on_capture_failure():
+    class OOMError(RuntimeError):
+        pass
+
+    capture_sess = _make_mock_session_with_inputs()
+    capture_sess.run.side_effect = OOMError("BFC arena alloc failed")
+
+    eager_sess = _make_mock_session_with_inputs()
+
+    call_count = {"n": 0}
+
+    def factory(cg_enabled):
+        call_count["n"] += 1
+        # First call: cg_enabled=True → capture session (raises)
+        # Second call: cg_enabled=False → eager fallback session
+        return capture_sess if cg_enabled else eager_sess
+
+    fb_before = _get_counter(
+        reflex_cuda_graph_capture_failed_at_init_total,
+        {"embodiment": "franka", "model_id": "cg-try-2",
+         "session": "vlm_prefix", "reason": "OOMError"},
+    )
+
+    result = try_capture_or_fall_back(
+        factory, session_name="vlm_prefix",
+        embodiment="franka", model_id="cg-try-2",
+    )
+
+    assert isinstance(result, EagerSessionWrapper)
+    assert result.captured is False
+    assert result.session is eager_sess
+    assert call_count["n"] == 2  # tried capture, then built eager
+    assert _get_counter(
+        reflex_cuda_graph_capture_failed_at_init_total,
+        {"embodiment": "franka", "model_id": "cg-try-2",
+         "session": "vlm_prefix", "reason": "OOMError"},
+    ) == fb_before + 1
+
+
+def test_try_capture_eager_wrapper_forwards_run_to_session():
+    """Integration: after graceful-degrade, `.run()` on the returned wrapper
+    should forward to the eager session and NOT re-trigger capture."""
+    class OOMError(RuntimeError):
+        pass
+
+    capture_sess = _make_mock_session_with_inputs()
+    capture_sess.run.side_effect = OOMError("BFC alloc fail")
+
+    eager_sess = _make_mock_session_with_inputs()
+    eager_sess.run.return_value = ["eager_result"]
+
+    def factory(cg_enabled):
+        return capture_sess if cg_enabled else eager_sess
+
+    result = try_capture_or_fall_back(
+        factory, session_name="vlm_prefix",
+        embodiment="franka", model_id="cg-try-3",
+    )
+
+    feed = {"x": [[1.0, 2.0, 3.0, 4.0]]}
+    out = result.run(None, feed)
+    assert out == ["eager_result"]
+    eager_sess.run.assert_called_with(None, feed)
