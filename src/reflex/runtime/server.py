@@ -1049,6 +1049,7 @@ def create_app(
     otel_endpoint: str | None = None,  # OTLP gRPC endpoint (e.g. "localhost:4317")
     otel_sample: float = 1.0,  # 0.0-1.0; 1.0=sample all, 0.1=10% (OTel SemConv)
     robot_id: str | None = None,  # fleet-telemetry: human-readable per-process identity
+    cuda_graphs_enabled: bool = False,  # opt-in ORT cuda-graphs on decomposed sessions
 ) -> Any:
     """Create a FastAPI app for serving VLA predictions.
 
@@ -1276,6 +1277,20 @@ def create_app(
     server.max_consecutive_crashes = int(max_consecutive_crashes)  # type: ignore[attr-defined]
     server.prewarm_enabled = bool(prewarm)  # type: ignore[attr-defined]
     server.robot_id = robot_id or ""  # type: ignore[attr-defined]
+    server._cuda_graphs_enabled = bool(cuda_graphs_enabled)  # type: ignore[attr-defined]
+    # The cuda_graphs_enabled flag is consumed by Pi05DecomposedInference when
+    # that backend is instantiated (scripts/modal_*_decomposed.py paths, and
+    # future production wiring once chunk-budget-batching lands the decomposed-
+    # dispatch fix in server.py). When set on a legacy ReflexServer backend,
+    # the flag has no effect — log once so operators notice the no-op.
+    if cuda_graphs_enabled and type(server).__name__ == "ReflexServer":
+        logger.info(
+            "--cuda-graphs was set but this backend (ReflexServer legacy decomposed "
+            "path) does not consume the flag. cuda-graphs applies to the "
+            "Pi05DecomposedInference dispatch path (Modal scripts today; production "
+            "wire-up pending the decomposed-dispatch fix tracked by chunk-budget-"
+            "batching). Request behavior unchanged."
+        )
 
     @asynccontextmanager
     async def lifespan(app):

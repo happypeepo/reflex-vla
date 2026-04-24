@@ -1105,6 +1105,19 @@ def serve(
              "`instance` in Grafana (see dashboards/grafana/reflex-fleet.json). "
              "When unset, no extra cardinality is added — backward compatible.",
     ),
+    cuda_graphs: bool = typer.Option(
+        False,
+        "--cuda-graphs",
+        help="Enable ORT CUDA-graph capture + replay on the decomposed "
+             "vlm_prefix + expert_denoise ONNX sessions. A100+: full capture "
+             "(~4.4x vlm_prefix + ~3.0x expert_denoise per Modal A/B "
+             "2026-04-25). A10G: expert-only capture (~3.8x); vlm_prefix "
+             "graceful-degrades to eager at session init with an INFO log + "
+             "`reflex_cuda_graph_capture_failed_at_init_total` metric (A10G "
+             "vlm_prefix OOMs at capture time per vLLM #5517 memory "
+             "overhead pattern). Default off — opt-in for Phase 1 per ADR "
+             "2026-04-24-cuda-graphs-architecture.",
+    ),
     verbose: bool = typer.Option(False, help="Verbose logging"),
 ):
     """Start a VLA inference server. POST /act with image + instruction → actions.
@@ -1353,6 +1366,7 @@ def serve(
         otel_endpoint=otel_endpoint or None,
         otel_sample=otel_sample,
         robot_id=robot_id or None,
+        cuda_graphs_enabled=cuda_graphs,
     )
     if api_key:
         composed.append("[cyan]api-key-auth[/cyan]")
@@ -1366,6 +1380,8 @@ def serve(
         )
     if robot_id:
         composed.append(f"[cyan]robot[/cyan]={robot_id}")
+    if cuda_graphs:
+        composed.append("[cyan]cuda-graphs[/cyan]")
     # MCP server integration (Phase 1 mcp-server feature).
     # --mcp --mcp-transport stdio: MCP-only mode (FastAPI NOT started — stdio
     #   needs to own stdin/stdout; used for Claude Desktop / Cursor).

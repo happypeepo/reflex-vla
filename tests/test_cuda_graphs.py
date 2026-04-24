@@ -28,6 +28,34 @@ from reflex.runtime.cuda_graphs import (
 
 
 # ---------------------------------------------------------------------------
+# Phase 1 Day 8+ CLI / create_app wiring
+# ---------------------------------------------------------------------------
+
+def test_cli_serve_help_advertises_cuda_graphs_flag():
+    """Guard against accidental --cuda-graphs flag removal or rename."""
+    from typer.testing import CliRunner
+
+    from reflex.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["serve", "--help"])
+    assert result.exit_code == 0
+    assert "--cuda-graphs" in result.output
+
+
+def test_create_app_accepts_cuda_graphs_enabled_kwarg():
+    """create_app() must accept cuda_graphs_enabled with default False per ADR
+    2026-04-24-cuda-graphs-architecture. Catches signature drift."""
+    import inspect
+
+    from reflex.runtime.server import create_app
+
+    sig = inspect.signature(create_app)
+    assert "cuda_graphs_enabled" in sig.parameters
+    assert sig.parameters["cuda_graphs_enabled"].default is False
+
+
+# ---------------------------------------------------------------------------
 # build_cuda_graph_providers
 # ---------------------------------------------------------------------------
 
