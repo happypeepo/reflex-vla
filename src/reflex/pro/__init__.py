@@ -37,6 +37,16 @@ from reflex.pro.eval_gate import (
     GateThresholds,
     InsufficientEpisodes,
 )
+from reflex.pro.hf_hub import (
+    HfHubAuthFailure,
+    HfHubClient,
+    HfHubDown,
+    HfHubError,
+    HfHubMissingToken,
+    HfPullOutcome,
+    HfPushOutcome,
+    HfRepoSpec,
+)
 from reflex.pro.post_swap_monitor import (
     MonitorConfig,
     PostSwapMonitor,
@@ -70,6 +80,14 @@ __all__ = [
     "GateResult",
     "GateThresholds",
     "HardwareFingerprintLite",
+    "HfHubAuthFailure",
+    "HfHubClient",
+    "HfHubDown",
+    "HfHubError",
+    "HfHubMissingToken",
+    "HfPullOutcome",
+    "HfPushOutcome",
+    "HfRepoSpec",
     "InsufficientEpisodes",
     "KickDecision",
     "LicenseCorrupt",
