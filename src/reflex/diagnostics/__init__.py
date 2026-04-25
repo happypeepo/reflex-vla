@@ -138,6 +138,13 @@ def _ensure_registry_loaded() -> None:
     # Phase 1 cuda-graphs check — added 2026-04-24 per ADR
     # 2026-04-24-cuda-graphs-architecture (surfaces A10G tier-aware semantics)
     from . import check_cuda_graphs  # noqa: F401
+    # Phase 1 eval-as-a-service checks — added 2026-04-25 per ADR
+    # 2026-04-25-eval-as-a-service-architecture decision #9
+    from . import (  # noqa: F401
+        check_libero_importable,
+        check_modal_auth,
+        check_vla_eval_importable,
+    )
 
 
 def run_all_checks(
