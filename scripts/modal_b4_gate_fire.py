@@ -438,9 +438,20 @@ def main(
     )
     print("\n" + "=" * 70)
     print(f"GATE DECISION: {result.get('decision')}")
-    print(f"in-dist MSE:  {result.get('in_dist_mse'):.6f}")
-    print(f"held-out MSE: {result.get('held_out_mse'):.6f}")
-    print(f"ratio:        {result.get('ratio'):.3f}")
+    # Defensive formatting: when the underlying gate aborted on bad data
+    # (e.g., empty action chunks from missing ONNX), the MSE/ratio fields
+    # come back as None. Don't crash the printer.
+    def _fmt(v, spec):
+        if v is None:
+            return "(none -- gate aborted before measurement)"
+        try:
+            return format(v, spec)
+        except (TypeError, ValueError):
+            return repr(v)
+
+    print(f"in-dist MSE:  {_fmt(result.get('in_dist_mse'), '.6f')}")
+    print(f"held-out MSE: {_fmt(result.get('held_out_mse'), '.6f')}")
+    print(f"ratio:        {_fmt(result.get('ratio'), '.3f')}")
     print(f"exit code:    {result.get('exit_code')}")
     print("=" * 70)
     if "error" in result:
