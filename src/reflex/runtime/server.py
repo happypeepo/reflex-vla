@@ -1167,6 +1167,26 @@ def create_app(
             max_batch=max_batch,
             batch_timeout_ms=batch_timeout_ms,
         )
+    elif _monolithic_cfg.get("export_kind") == "decomposed":
+        # Per ADR 2026-04-25-decomposed-dispatch-via-reflex-serve: the
+        # decomposed export (vlm_prefix.onnx + expert_denoise.onnx) needs
+        # the wrapper around Pi05DecomposedInference, NOT the legacy
+        # ReflexServer (which expects expert_stack.onnx and degrades to
+        # "No ONNX model found"). Closes the B.4/B.5 measurement gap
+        # documented in the 2026-04-25 b4-gate-refire-v3 experiment.
+        from reflex.runtime.decomposed_server import Pi05DecomposedServer
+        server = Pi05DecomposedServer(
+            export_dir,
+            device=device,
+            providers=providers,
+            strict_providers=strict_providers,
+            safety_config=safety_config,
+            adaptive_steps=adaptive_steps,
+            cloud_fallback_url=cloud_fallback_url,
+            deadline_ms=deadline_ms,
+            max_batch=max_batch,
+            batch_timeout_ms=batch_timeout_ms,
+        )
     elif _monolithic_cfg.get("export_kind") == "monolithic":
         _model_type = _monolithic_cfg.get("model_type", "smolvla")
         _ort_providers = providers or (
