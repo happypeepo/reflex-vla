@@ -99,8 +99,10 @@ def probe_calibration_a10g() -> dict:
     fp = HardwareFingerprint.current()
     print(f"[calibration]   gpu_name: {fp.gpu_name!r}")
     print(f"[calibration]   gpu_uuid: {fp.gpu_uuid!r}")
-    print(f"[calibration]   driver: {fp.driver_major}.{fp.driver_minor}")
-    print(f"[calibration]   cuda: {fp.cuda_major}.{fp.cuda_minor}")
+    print(f"[calibration]   driver: {fp.driver_version_major}.{fp.driver_version_minor}")
+    print(f"[calibration]   cuda: {fp.cuda_version_major}.{fp.cuda_version_minor}")
+    print(f"[calibration]   kernel: {fp.kernel_release!r}")
+    print(f"[calibration]   cpu_count: {fp.cpu_count}")
     print(f"[calibration]   ram_gb: {fp.ram_gb}")
     print(f"[calibration]   reflex_version: {fp.reflex_version}")
 
@@ -139,16 +141,7 @@ def probe_calibration_a10g() -> dict:
     return {
         "status": "ok",
         "tier": "A10G",
-        "fingerprint": {
-            "gpu_name": fp.gpu_name,
-            "gpu_uuid": fp.gpu_uuid,
-            "driver_major": fp.driver_major,
-            "driver_minor": fp.driver_minor,
-            "cuda_major": fp.cuda_major,
-            "cuda_minor": fp.cuda_minor,
-            "ram_gb": fp.ram_gb,
-            "reflex_version": fp.reflex_version,
-        },
+        "fingerprint": fp.to_dict(),
         "quality": {
             "median_ms": quality.median_ms,
             "p99_ms": quality.p99_ms,
@@ -176,8 +169,10 @@ def main():
     print(f"  tier:   {r['tier']}")
     fp = r["fingerprint"]
     print(f"  gpu:    {fp['gpu_name']!r} (uuid={fp['gpu_uuid'][:16]!r}...)")
-    print(f"  driver: {fp['driver_major']}.{fp['driver_minor']}")
-    print(f"  cuda:   {fp['cuda_major']}.{fp['cuda_minor']}")
+    print(f"  driver: {fp['driver_version_major']}.{fp['driver_version_minor']}")
+    print(f"  cuda:   {fp['cuda_version_major']}.{fp['cuda_version_minor']}")
+    print(f"  kernel: {fp['kernel_release']!r}")
+    print(f"  cpu:    {fp['cpu_count']}")
     print(f"  ram:    {fp['ram_gb']}GB")
     print(f"  reflex: {fp['reflex_version']}")
     q = r["quality"]
