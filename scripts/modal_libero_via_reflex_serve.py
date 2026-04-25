@@ -352,8 +352,13 @@ def libero_via_serve(
                             actions = resp.get("actions") or []
                             if not actions:
                                 raise RuntimeError("/act returned empty actions")
-                            # Take the first action of the chunk (chunk-by-chunk replan)
-                            action = np.asarray(actions[0], dtype=np.float32)
+                            # Take the first action of the chunk (chunk-by-chunk replan).
+                            # Pi05DecomposedServer returns action_dim per export config
+                            # (32 for pi05 padded). LIBERO franka env expects 7-DOF.
+                            # Truncate client-side -- mirrors the LIBERO convention in
+                            # modal_libero_monolithic_onnx.py:_onnx_predict_chunk
+                            # (chunk_np[:, :7]). Caught 2026-04-25 first smoke.
+                            action = np.asarray(actions[0], dtype=np.float32)[:7]
                             obs, _, done, info = env.step(action.tolist())
                             n_steps += 1
                             t += 1
