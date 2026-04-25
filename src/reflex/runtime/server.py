@@ -1077,6 +1077,9 @@ def create_app(
     robot_id: str | None = None,  # fleet-telemetry: human-readable per-process identity
     cuda_graphs_enabled: bool = False,  # opt-in ORT cuda-graphs on decomposed sessions
     a2c2_checkpoint: str | None = None,  # path to .npz A2C2 head; None disables A2C2
+    auto_calibrate: bool = False,  # Phase 1 auto-calibration opt-in
+    calibration_cache_path: str | None = None,  # path to ~/.reflex/calibration.json
+    calibrate_force: bool = False,  # ignore cache hit, re-run measurement
 ) -> Any:
     """Create a FastAPI app for serving VLA predictions.
 
@@ -1305,6 +1308,46 @@ def create_app(
     server.prewarm_enabled = bool(prewarm)  # type: ignore[attr-defined]
     server.robot_id = robot_id or ""  # type: ignore[attr-defined]
     server._cuda_graphs_enabled = bool(cuda_graphs_enabled)  # type: ignore[attr-defined]
+
+    # Auto-calibration cache load (Phase 1 auto-calibration Day 4 plumbing).
+    # Day 5 wires the actual measurement + apply; Day 4 just loads + exposes
+    # the cache so `reflex doctor --show-calibration` works against a live
+    # server. server.calibration_cache is None when --auto-calibrate is unset.
+    server.calibration_cache = None  # type: ignore[attr-defined]
+    server.calibration_cache_path = None  # type: ignore[attr-defined]
+    server.auto_calibrate_enabled = bool(auto_calibrate)  # type: ignore[attr-defined]
+    server.calibrate_force = bool(calibrate_force)  # type: ignore[attr-defined]
+    if auto_calibrate and calibration_cache_path:
+        try:
+            from reflex.runtime.calibration import CalibrationCache, HardwareFingerprint
+            server.calibration_cache_path = str(Path(calibration_cache_path).expanduser())  # type: ignore[attr-defined]
+            server.calibration_cache = CalibrationCache.load_or_empty(  # type: ignore[attr-defined]
+                server.calibration_cache_path
+            )
+            _fp = HardwareFingerprint.current()
+            if calibrate_force:
+                logger.info(
+                    "auto-calibrate: --calibrate-force set, will re-measure "
+                    "regardless of cache state"
+                )
+            elif server.calibration_cache.is_stale(_fp):
+                logger.info(
+                    "auto-calibrate: cache stale (fingerprint mismatch or "
+                    "older than 30 days) — measurement will run on first /act"
+                )
+            else:
+                _entries_count = len(server.calibration_cache.entries)
+                logger.info(
+                    "auto-calibrate: cache hit at %s (%d entries, fingerprint matches)",
+                    server.calibration_cache_path, _entries_count,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "auto-calibrate: cache load failed at %s: %s — continuing "
+                "without auto-calibration",
+                calibration_cache_path, exc,
+            )
+            server.calibration_cache = None  # type: ignore[attr-defined]
 
     # A2C2 correction hook (Phase 1 a2c2-correction feature). When
     # `a2c2_checkpoint` is provided, the hook loads the head + wires into

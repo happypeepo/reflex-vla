@@ -1117,6 +1117,30 @@ def serve(
              "`instance` in Grafana (see dashboards/grafana/reflex-fleet.json). "
              "When unset, no extra cardinality is added — backward compatible.",
     ),
+    auto_calibrate: bool = typer.Option(
+        False,
+        "--auto-calibrate",
+        help="Run hardware-fit calibration at startup. Probes the GPU + "
+             "embodiment + model_hash and SELECTS the right pre-shipped "
+             "(variant × provider × NFE × chunk_size) configuration; "
+             "passively learns latency_compensation_ms during the first 30s "
+             "of /act traffic. Persists to --calibration-cache. Cache hit on "
+             "matching hardware fingerprint = instant; miss = ~5-7s "
+             "measurement. Per ADR 2026-04-25-auto-calibration-architecture.",
+    ),
+    calibration_cache: str = typer.Option(
+        "~/.reflex/calibration.json",
+        "--calibration-cache",
+        help="Path to the calibration JSON cache. Default lives in the user's "
+             "home dir; override to ship a frozen cache inside a container. "
+             "Validated early — parent dir must be writable.",
+    ),
+    calibrate_force: bool = typer.Option(
+        False,
+        "--calibrate-force",
+        help="Re-run calibration even on cache hit (useful after hardware swap). "
+             "Requires --auto-calibrate.",
+    ),
     a2c2_checkpoint: str = typer.Option(
         "",
         "--a2c2-checkpoint",
@@ -1358,6 +1382,25 @@ def serve(
             f"PolicyRuntime always uses --max-batch-cost-ms (default 100).[/yellow]"
         )
 
+    # auto-calibration mutual-exclusion validation
+    if calibrate_force and not auto_calibrate:
+        console.print(
+            "[red]--calibrate-force requires --auto-calibrate.[/red]"
+        )
+        raise typer.Exit(1)
+    _calib_cache_path = Path(calibration_cache).expanduser() if calibration_cache else None
+    if auto_calibrate and _calib_cache_path is not None:
+        # Fail loud at CLI layer if parent dir isn't writable. Mirrors the
+        # embodiment-config validation pattern at cli.py:1128-1162.
+        try:
+            _calib_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            console.print(
+                f"[red]--calibration-cache parent dir not writable: "
+                f"{_calib_cache_path.parent} — {exc}[/red]"
+            )
+            raise typer.Exit(1)
+
     # SLO enforcement (Phase 1 latency-slo-enforcement feature).
     # --slo required to enable; default mode is "degrade".
     slo_tracker = None
@@ -1405,6 +1448,9 @@ def serve(
         cuda_graphs_enabled=cuda_graphs,
         max_batch_cost_ms=max_batch_cost_ms,
         a2c2_checkpoint=a2c2_checkpoint or None,
+        auto_calibrate=auto_calibrate,
+        calibration_cache_path=str(_calib_cache_path) if _calib_cache_path else None,
+        calibrate_force=calibrate_force,
     )
     if api_key:
         composed.append("[cyan]api-key-auth[/cyan]")
@@ -1422,6 +1468,8 @@ def serve(
         composed.append("[cyan]cuda-graphs[/cyan]")
     if a2c2_checkpoint:
         composed.append(f"[cyan]a2c2[/cyan]={Path(a2c2_checkpoint).name}")
+    if auto_calibrate:
+        composed.append("[cyan]auto-calibrate[/cyan]" + ("[force]" if calibrate_force else ""))
     composed.append(f"[cyan]batch-budget[/cyan]={max_batch_cost_ms:g}ms")
     # MCP server integration (Phase 1 mcp-server feature).
     # --mcp --mcp-transport stdio: MCP-only mode (FastAPI NOT started — stdio
@@ -1773,6 +1821,20 @@ def doctor(
         "--skip",
         help="Deploy-diagnostic check IDs to skip. Repeatable.",
     ),
+    show_calibration: bool = typer.Option(
+        False,
+        "--show-calibration",
+        help="Pretty-print the auto-calibration cache from "
+             "--calibration-cache (default ~/.reflex/calibration.json). "
+             "When combined with --format json, emits a machine-readable "
+             "snapshot for CI / scripts. Per a2u-calibration plan B.5 Day 4.",
+    ),
+    calibration_cache: str = typer.Option(
+        "~/.reflex/calibration.json",
+        "--calibration-cache",
+        help="Path to the auto-calibration cache JSON. Used by "
+             "--show-calibration.",
+    ),
 ):
     """Diagnose Reflex install + GPU issues + (optionally) per-deploy issues.
 
@@ -1796,6 +1858,71 @@ def doctor(
             f"[red]--format must be 'human' or 'json', got {output_format!r}[/red]"
         )
         raise typer.Exit(2)
+
+    # --show-calibration short-circuits the full doctor flow: just print the
+    # cache + exit. Used by operators to quickly inspect what the auto-calibrate
+    # cache holds + how stale it is.
+    if show_calibration:
+        from reflex.runtime.calibration import (
+            CalibrationCache,
+            HardwareFingerprint,
+        )
+        cache_path = Path(calibration_cache).expanduser()
+        if not cache_path.exists():
+            if output_format == "json":
+                import json as _json
+                _json.dump({"error": "cache_not_found", "path": str(cache_path)},
+                           sys.stdout, indent=2)
+                print()
+            else:
+                console.print(
+                    f"[yellow]No calibration cache found at {cache_path}. "
+                    f"Run `reflex serve --auto-calibrate` first.[/yellow]"
+                )
+            raise typer.Exit(0)
+        try:
+            cache = CalibrationCache.load(cache_path)
+        except Exception as exc:
+            console.print(f"[red]Failed to load cache: {exc}[/red]")
+            raise typer.Exit(1)
+
+        current_fp = HardwareFingerprint.current()
+        is_stale = cache.is_stale(current_fp)
+
+        if output_format == "json":
+            import json as _json
+            payload = {
+                "path": str(cache_path),
+                "current_fingerprint": current_fp.to_dict(),
+                "is_stale": is_stale,
+                "cache": cache.to_dict(),
+            }
+            _json.dump(payload, sys.stdout, indent=2)
+            print()
+            raise typer.Exit(0)
+
+        # Human-readable
+        console.print(f"[bold]Calibration cache:[/bold] {cache_path}")
+        console.print(f"  schema_version: {cache.schema_version}")
+        console.print(f"  reflex_version: {cache.reflex_version}")
+        console.print(f"  calibration_date: {cache.calibration_date}")
+        console.print(
+            f"  hardware_fingerprint: " +
+            ("[green]matches current host[/green]" if not is_stale else
+             "[yellow]STALE — hardware/version mismatch or > 30d old[/yellow]")
+        )
+        console.print(f"\n[bold]Entries ({len(cache.entries)}):[/bold]")
+        if not cache.entries:
+            console.print("  (none)")
+        else:
+            for k, e in cache.entries.items():
+                console.print(
+                    f"  {k}: chunk={e.chunk_size} nfe={e.nfe} "
+                    f"latency_comp={e.latency_compensation_ms:g}ms "
+                    f"provider={e.provider} variant={e.variant} "
+                    f"quality={e.measurement_quality.quality_score:.2f}"
+                )
+        raise typer.Exit(0)
 
     table = Table(title="Reflex Doctor")
     table.add_column("Check", style="cyan", no_wrap=True)

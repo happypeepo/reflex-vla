@@ -849,3 +849,132 @@ def test_resolver_latency_compensation_so100():
 def test_resolver_latency_compensation_unknown_embodiment_uses_default():
     resolver = GreedyResolver(_mk_inputs(embodiment="custom_robot_xyz"))
     assert resolver.resolve_latency_compensation_ms() == 40.0  # global default
+
+
+# ---------------------------------------------------------------------------
+# Day 4 — CLI flag wiring + doctor --show-calibration
+# ---------------------------------------------------------------------------
+
+
+def test_cli_serve_help_advertises_auto_calibrate_flags():
+    """Guard against accidental --auto-calibrate / --calibration-cache /
+    --calibrate-force flag removal or rename."""
+    from typer.testing import CliRunner
+    from reflex.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["serve", "--help"])
+    assert result.exit_code == 0
+    for flag in ("--auto-calibrate", "--calibration-cache", "--calibrate-force"):
+        assert flag in result.output, f"missing {flag} on serve --help"
+
+
+def test_cli_doctor_help_advertises_show_calibration():
+    from typer.testing import CliRunner
+    from reflex.cli import app
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["doctor", "--help"])
+    assert result.exit_code == 0
+    assert "--show-calibration" in result.output
+
+
+def test_cli_doctor_show_calibration_missing_cache_human(tmp_path):
+    """doctor --show-calibration on a missing cache prints a friendly
+    message + exits 0."""
+    from typer.testing import CliRunner
+    from reflex.cli import app
+
+    runner = CliRunner()
+    cache_path = tmp_path / "missing_cache.json"
+    result = runner.invoke(app, [
+        "doctor", "--show-calibration",
+        "--calibration-cache", str(cache_path),
+    ])
+    assert result.exit_code == 0
+    assert "No calibration cache" in result.output
+
+
+def test_cli_doctor_show_calibration_missing_cache_json(tmp_path):
+    """JSON format on missing cache emits a structured error."""
+    from typer.testing import CliRunner
+    from reflex.cli import app
+
+    runner = CliRunner()
+    cache_path = tmp_path / "missing_cache.json"
+    result = runner.invoke(app, [
+        "doctor", "--show-calibration",
+        "--calibration-cache", str(cache_path),
+        "--format", "json",
+    ])
+    assert result.exit_code == 0
+    assert "cache_not_found" in result.output
+
+
+def test_cli_doctor_show_calibration_loaded_cache_human(tmp_path):
+    """When the cache exists, --show-calibration pretty-prints entries."""
+    from typer.testing import CliRunner
+    from reflex.cli import app
+
+    cache_path = tmp_path / "cache.json"
+    cache = CalibrationCache(
+        reflex_version="0.5.0",
+        calibration_date=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        hardware_fingerprint=_mk_fp(),
+    )
+    cache.record(embodiment="franka", model_hash="abc123", entry=_mk_entry())
+    cache.save(cache_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, [
+        "doctor", "--show-calibration",
+        "--calibration-cache", str(cache_path),
+    ])
+    assert result.exit_code == 0
+    assert "franka::abc123" in result.output
+    assert "schema_version" in result.output
+
+
+def test_cli_doctor_show_calibration_loaded_cache_json(tmp_path):
+    """JSON format emits the full cache + a current_fingerprint snapshot."""
+    from typer.testing import CliRunner
+    from reflex.cli import app
+    import json as _json
+
+    cache_path = tmp_path / "cache.json"
+    cache = CalibrationCache(
+        reflex_version="0.5.0",
+        calibration_date=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        hardware_fingerprint=_mk_fp(),
+    )
+    cache.record(embodiment="franka", model_hash="abc123", entry=_mk_entry())
+    cache.save(cache_path)
+
+    runner = CliRunner()
+    result = runner.invoke(app, [
+        "doctor", "--show-calibration",
+        "--calibration-cache", str(cache_path),
+        "--format", "json",
+    ])
+    assert result.exit_code == 0
+    payload = _json.loads(result.output)
+    assert "cache" in payload
+    assert "current_fingerprint" in payload
+    assert "is_stale" in payload
+    assert payload["cache"]["schema_version"] == SCHEMA_VERSION
+    assert "franka::abc123" in payload["cache"]["entries"]
+
+
+def test_create_app_accepts_auto_calibrate_kwargs():
+    """Signature drift guard — Day 4 wiring threads three new kwargs."""
+    import inspect
+    from reflex.runtime.server import create_app
+
+    sig = inspect.signature(create_app)
+    for name in ("auto_calibrate", "calibration_cache_path", "calibrate_force"):
+        assert name in sig.parameters, (
+            f"create_app() must expose {name} kwarg — Day 4 wiring"
+        )
+    assert sig.parameters["auto_calibrate"].default is False
+    assert sig.parameters["calibration_cache_path"].default is None
+    assert sig.parameters["calibrate_force"].default is False
