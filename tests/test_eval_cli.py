@@ -147,11 +147,13 @@ def test_eval_prints_banner_with_inputs(fake_export, stub_preflight_pass, stub_m
 
 
 def test_eval_banner_marks_video_when_set(fake_export, stub_preflight_pass, stub_modal_runner):
+    """--video is honest about Phase 2 deferral (encoder ready; frame
+    capture wires Phase 2 once modal_libero scripts surface frames)."""
     result = runner.invoke(
         app, ["eval", str(fake_export), "--video"],
     )
     assert "Video:" in result.stdout
-    assert "on" in result.stdout
+    assert "Phase 2" in result.stdout
 
 
 # ---------------------------------------------------------------------------

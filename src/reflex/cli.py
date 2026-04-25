@@ -925,7 +925,11 @@ def eval_cmd(
     console.print(f"  Seed:        {seed}")
     console.print(f"  Output:      {output}")
     if video:
-        console.print(f"  Video:       [cyan]on[/cyan] (per-episode MP4)")
+        console.print(
+            f"  Video:       [yellow]requested but Phase 2[/yellow] "
+            f"[dim](encoder ready in src/reflex/eval/video.py; modal_libero "
+            f"frame-capture wires Phase 2)[/dim]"
+        )
     if cost_preview:
         console.print(f"  Mode:        [yellow]COST PREVIEW (no run)[/yellow]")
 
