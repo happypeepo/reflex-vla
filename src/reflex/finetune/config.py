@@ -126,8 +126,31 @@ class FinetuneConfig:
     fixed point, then 0 for fine-tuning. Currently constant
     throughout training; curriculum schedule TBD."""
 
+    base_dataset: str | None = None
+    """Optional second dataset to MIX with `dataset` during training.
+    When set, the dataloader uses ConcatDataset + WeightedRandomSampler
+    to draw from both sources per `mix_ratio`. Used by Pro-tier
+    self-distilling-serve (per ADR 2026-04-25-self-distilling-serve-
+    architecture decision #2): customer's collected data goes in
+    `dataset`; the original LeRobot training set goes in `base_dataset`
+    so the student doesn't catastrophically forget the base distribution.
+    Requires both datasets to share action_dim + chunk_size; preflight
+    cross-validates."""
+
+    mix_ratio: float = 0.5
+    """When `base_dataset` is set, fraction of each batch drawn from the
+    customer `dataset` (vs `base_dataset`). 0.0 = base only (no
+    customer adaptation). 1.0 = customer only (max adaptation, max
+    catastrophic-forgetting risk). Default 0.5 (50/50) per ADR
+    2026-04-25-self-distilling-serve-architecture: balances adaptation
+    against base-distribution preservation."""
+
     def __post_init__(self) -> None:
         self.output = Path(self.output)
+        if not (0.0 <= self.mix_ratio <= 1.0):
+            raise ValueError(
+                f"mix_ratio must be in [0, 1], got {self.mix_ratio}"
+            )
 
 
 @dataclass

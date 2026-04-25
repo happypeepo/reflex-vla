@@ -759,6 +759,60 @@ def _build_dataloader(cfg, *, policy_type: str, chunk_size: int | None = None):
         )
 
     dataset = LeRobotDataset(cfg.dataset, delta_timestamps=delta_timestamps)
+
+    # Pro-tier base+customer mix per ADR 2026-04-25-self-distilling-serve-
+    # architecture decision #2. When cfg.base_dataset is set, mix the two
+    # datasets via ConcatDataset + WeightedRandomSampler so the student
+    # adapts to customer data WITHOUT catastrophically forgetting the
+    # base distribution. Default mix_ratio=0.5 (50/50). When unset,
+    # behaves exactly as before (single-dataset shuffle loader).
+    base_dataset_id = getattr(cfg, "base_dataset", None)
+    mix_ratio = getattr(cfg, "mix_ratio", 0.5)
+    if base_dataset_id:
+        base_ds = LeRobotDataset(base_dataset_id, delta_timestamps=delta_timestamps)
+        # Cross-validate critical fields so a mismatched base+customer pair
+        # fails loud at preflight rather than producing garbage gradients.
+        if hasattr(dataset, "features") and hasattr(base_ds, "features"):
+            cust_action = dataset.features.get("action") if dataset.features else None
+            base_action = base_ds.features.get("action") if base_ds.features else None
+            if cust_action is not None and base_action is not None:
+                if cust_action.get("shape") != base_action.get("shape"):
+                    raise ValueError(
+                        f"base_dataset action shape {base_action.get('shape')} "
+                        f"does not match dataset action shape {cust_action.get('shape')}"
+                    )
+        from torch.utils.data import ConcatDataset, WeightedRandomSampler
+        combined = ConcatDataset([dataset, base_ds])
+        # Weight per-sample so a random draw produces customer with prob
+        # `mix_ratio` and base with prob `1 - mix_ratio`.
+        n_cust = len(dataset)
+        n_base = len(base_ds)
+        # Avoid div-by-zero on empty datasets.
+        weight_cust = (mix_ratio / max(1, n_cust))
+        weight_base = ((1.0 - mix_ratio) / max(1, n_base))
+        sample_weights = (
+            [weight_cust] * n_cust + [weight_base] * n_base
+        )
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=n_cust + n_base,
+            replacement=True,
+        )
+        loader = torch.utils.data.DataLoader(
+            combined,
+            batch_size=cfg.batch_size,
+            sampler=sampler,  # mutually exclusive with shuffle=True
+            num_workers=2,
+            pin_memory=True,
+            drop_last=True,
+        )
+        logger.info(
+            "[snapflow] base+customer mix: dataset=%s (n=%d) + base_dataset=%s "
+            "(n=%d), mix_ratio=%.2f",
+            cfg.dataset, n_cust, base_dataset_id, n_base, mix_ratio,
+        )
+        return loader
+
     loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=cfg.batch_size,
