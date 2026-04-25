@@ -1472,6 +1472,41 @@ def serve(
              "overhead pattern). Default off — opt-in for Phase 1 per ADR "
              "2026-04-24-cuda-graphs-architecture.",
     ),
+    policy_a: str = typer.Option(
+        "", "--policy-a",
+        help="2-policy A/B mode: path to policy A export. When set, --policy-b "
+             "must also be set + --no-rtc enforced (RTC carry-over is per-policy). "
+             "See docs/policy_versioning.md.",
+    ),
+    policy_b: str = typer.Option(
+        "", "--policy-b",
+        help="2-policy A/B mode: path to policy B export. Must be paired with "
+             "--policy-a + --no-rtc. Mutually exclusive with --shadow-policy.",
+    ),
+    split: int = typer.Option(
+        50, "--split",
+        help="2-policy mode: percent of traffic routed to policy A in [0, 100]. "
+             "Sticky-per-episode (router uses SHA-256 hash of episode_id). "
+             "Edge cases: 0 = all to B, 100 = all to A (shadow-staging mode).",
+    ),
+    shadow_policy: str = typer.Option(
+        "", "--shadow-policy",
+        help="(Phase 1.5) shadow inference: path to a policy that runs alongside "
+             "the primary on a sample of traffic. Phase 1: shipped INERT (logs "
+             "warning when set, no shadow execution). Mutually exclusive with "
+             "--policy-b.",
+    ),
+    shadow_sample: float = typer.Option(
+        0.0, "--shadow-sample",
+        help="(Phase 1.5) fraction of /act requests to mirror to --shadow-policy "
+             "in [0, 1]. Phase 1: ignored.",
+    ),
+    no_rtc: bool = typer.Option(
+        False, "--no-rtc",
+        help="Disable RTC even when --rtc was previously enabled. REQUIRED in "
+             "2-policy mode (--policy-b set) per ADR "
+             "2026-04-25-policy-versioning-architecture.",
+    ),
     verbose: bool = typer.Option(False, help="Verbose logging"),
 ):
     """Start a VLA inference server. POST /act with image + instruction → actions.
@@ -1491,6 +1526,60 @@ def serve(
     if not onnx_files:
         console.print(f"[red]No ONNX files found in {export_dir}[/red]")
         raise typer.Exit(1)
+
+    # ---- Policy-versioning Day 5 validation ----
+    # 2-policy mode requires both --policy-a + --policy-b. Mutually
+    # exclusive with --shadow-policy. --no-rtc enforced in 2-policy mode.
+    two_policy_mode = bool(policy_a or policy_b)
+    if two_policy_mode and not (policy_a and policy_b):
+        console.print(
+            "[red]--policy-a and --policy-b must be set together for "
+            "2-policy mode.[/red]\n"
+            "[dim]To roll out a single policy, drop both flags and pass "
+            "the model path as the positional argument.[/dim]"
+        )
+        raise typer.Exit(1)
+    if two_policy_mode and shadow_policy:
+        console.print(
+            "[red]--policy-b and --shadow-policy are mutually exclusive.[/red]\n"
+            "[dim]Pick A/B for production rollout, OR shadow for risk-free "
+            "comparison.[/dim]"
+        )
+        raise typer.Exit(1)
+    if two_policy_mode:
+        from reflex.runtime.policy import validate_split_and_no_rtc
+        try:
+            validate_split_and_no_rtc(split_a_percent=split, no_rtc=no_rtc)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1)
+        # Verify both policy paths exist before attempting to load
+        for label, path in (("--policy-a", policy_a), ("--policy-b", policy_b)):
+            if not Path(path).exists():
+                console.print(
+                    f"[red]{label} export not found: {path}[/red]"
+                )
+                raise typer.Exit(1)
+        # 2-policy load path lands in Day 9-10 integration; for now
+        # surface a clear "deferred" message rather than half-loading.
+        console.print(
+            f"\n[yellow]2-policy mode flags accepted (--policy-a={policy_a}, "
+            f"--policy-b={policy_b}, --split={split}).[/yellow]"
+        )
+        console.print(
+            "[yellow]Full 2-policy serving lands in Day 9-10 integration "
+            "(see features/01_serve/subfeatures/_ecosystem/policy-versioning/"
+            "policy-versioning_plan.md). Single-policy mode continues "
+            "below.[/yellow]\n"
+        )
+
+    if shadow_policy:
+        console.print(
+            f"\n[yellow]--shadow-policy={shadow_policy} (Phase 1.5; "
+            f"shipped inert in Phase 1).[/yellow] "
+            f"[dim]Shadow execution lands when "
+            f"shadow-inference primitive ships.[/dim]\n"
+        )
 
     # Resolve --embodiment / --custom-embodiment-config (B.1). Validate
     # early — before any compute or runtime checks — so a bad config fails
