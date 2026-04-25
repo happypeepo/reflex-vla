@@ -1117,6 +1117,16 @@ def serve(
              "`instance` in Grafana (see dashboards/grafana/reflex-fleet.json). "
              "When unset, no extra cardinality is added — backward compatible.",
     ),
+    a2c2_checkpoint: str = typer.Option(
+        "",
+        "--a2c2-checkpoint",
+        help="Path to a trained A2C2 correction-head checkpoint (.npz). When "
+             "set, the server applies per-step A2C2 corrections on the action "
+             "chunk after the policy returns it. Auto-skipped at low latency "
+             "(p95 < 40ms) or high success rate (>90%) — no overhead when not "
+             "needed. Per a2c2-correction execution plan B.5. Train with "
+             "scripts/train_a2c2_lerobot.py (Modal A100; user-authorized).",
+    ),
     cuda_graphs: bool = typer.Option(
         False,
         "--cuda-graphs",
@@ -1394,6 +1404,7 @@ def serve(
         robot_id=robot_id or None,
         cuda_graphs_enabled=cuda_graphs,
         max_batch_cost_ms=max_batch_cost_ms,
+        a2c2_checkpoint=a2c2_checkpoint or None,
     )
     if api_key:
         composed.append("[cyan]api-key-auth[/cyan]")
@@ -1409,6 +1420,8 @@ def serve(
         composed.append(f"[cyan]robot[/cyan]={robot_id}")
     if cuda_graphs:
         composed.append("[cyan]cuda-graphs[/cyan]")
+    if a2c2_checkpoint:
+        composed.append(f"[cyan]a2c2[/cyan]={Path(a2c2_checkpoint).name}")
     composed.append(f"[cyan]batch-budget[/cyan]={max_batch_cost_ms:g}ms")
     # MCP server integration (Phase 1 mcp-server feature).
     # --mcp --mcp-transport stdio: MCP-only mode (FastAPI NOT started — stdio

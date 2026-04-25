@@ -1076,6 +1076,7 @@ def create_app(
     otel_sample: float = 1.0,  # 0.0-1.0; 1.0=sample all, 0.1=10% (OTel SemConv)
     robot_id: str | None = None,  # fleet-telemetry: human-readable per-process identity
     cuda_graphs_enabled: bool = False,  # opt-in ORT cuda-graphs on decomposed sessions
+    a2c2_checkpoint: str | None = None,  # path to .npz A2C2 head; None disables A2C2
 ) -> Any:
     """Create a FastAPI app for serving VLA predictions.
 
@@ -1304,6 +1305,29 @@ def create_app(
     server.prewarm_enabled = bool(prewarm)  # type: ignore[attr-defined]
     server.robot_id = robot_id or ""  # type: ignore[attr-defined]
     server._cuda_graphs_enabled = bool(cuda_graphs_enabled)  # type: ignore[attr-defined]
+
+    # A2C2 correction hook (Phase 1 a2c2-correction feature). When
+    # `a2c2_checkpoint` is provided, the hook loads the head + wires into
+    # /act for per-chunk correction with auto-skip semantics. Per
+    # a2c2-correction execution plan B.5 Day 3.
+    server.a2c2_hook = None  # type: ignore[attr-defined]
+    if a2c2_checkpoint:
+        try:
+            from reflex.runtime.a2c2_hook import A2C2Hook
+            server.a2c2_hook = A2C2Hook.from_checkpoint(a2c2_checkpoint)  # type: ignore[attr-defined]
+            logger.info(
+                "A2C2 hook loaded: checkpoint=%s, "
+                "latency_threshold_ms=%.1f, success_threshold=%.2f",
+                a2c2_checkpoint,
+                server.a2c2_hook.config.latency_threshold_ms,
+                server.a2c2_hook.config.success_threshold,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failed to load A2C2 checkpoint %s: %s — A2C2 disabled",
+                a2c2_checkpoint, exc,
+            )
+            server.a2c2_hook = None  # type: ignore[attr-defined]
     # The cuda_graphs_enabled flag is consumed by Pi05DecomposedInference when
     # that backend is instantiated (scripts/modal_*_decomposed.py paths, and
     # future production wiring once chunk-budget-batching lands the decomposed-
@@ -1771,6 +1795,36 @@ def create_app(
                 except Exception as e:  # noqa: BLE001 — RTC must never break /act
                     logger.warning("RTC merge_and_update failed: %s", e)
 
+            # A2C2 correction hook (Phase 1 a2c2-correction Day 3).
+            # Applies a per-step residual correction to the action chunk
+            # when latency p95 ≥ threshold AND success rate ≤ threshold.
+            # Cold-start + no-hook → no-op. Per-act outcome recorded into
+            # the hook's rolling windows AFTER the apply call so the
+            # current request's signal joins the steady-state distribution.
+            _a2c2 = getattr(server, "a2c2_hook", None)
+            if (
+                _a2c2 is not None
+                and isinstance(result, dict)
+                and "error" not in result
+                and isinstance(result.get("actions"), list)
+                and result["actions"]
+            ):
+                try:
+                    actions_arr = np.asarray(result["actions"], dtype=np.float32)
+                    if actions_arr.ndim == 2:
+                        corrected, decision, magnitude = _a2c2.maybe_apply_to_chunk(
+                            actions=actions_arr,
+                        )
+                        result["a2c2_applied"] = decision.apply
+                        result["a2c2_reason"] = decision.reason
+                        result["a2c2_correction_magnitude"] = round(magnitude, 6)
+                        if decision.apply:
+                            result["actions"] = corrected.tolist()
+                        span.set_attribute("reflex.a2c2.applied", decision.apply)
+                        span.set_attribute("reflex.a2c2.reason", decision.reason)
+                except Exception as exc:  # noqa: BLE001 — A2C2 must never break /act
+                    logger.warning("a2c2_hook.apply_failed: %s", exc)
+
             # JSONL record hook (B.2). Writes inside the OTel span context
             # so the seq attribute below cross-links the two ledgers. Recorder
             # absent or degraded → no-op.
@@ -1810,6 +1864,20 @@ def create_app(
                 result["injected_latency_ms"] = _inj
                 span.set_attribute("reflex.injected_latency_ms", _inj)
                 await _asyncio.sleep(_inj / 1000.0)
+
+            # A2C2 outcome bookkeeping — feed the latency + success signal
+            # into the hook's rolling windows so subsequent should_apply()
+            # decisions reflect this request. Records regardless of whether
+            # we applied or skipped this time.
+            if _a2c2 is not None and isinstance(result, dict):
+                try:
+                    _latency_ms = float(result.get("latency_ms", 0.0))
+                    if _inj > 0:
+                        _latency_ms += _inj  # client-perceived latency
+                    _success = "error" not in result
+                    _a2c2.record_outcome(latency_ms=_latency_ms, success=_success)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("a2c2_hook.record_outcome_failed: %s", exc)
 
             return JSONResponse(content=result)
 

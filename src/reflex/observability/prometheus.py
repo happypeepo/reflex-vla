@@ -457,6 +457,37 @@ def observe_batch_flush(
 
 
 # ---------------------------------------------------------------------------
+# A2C2 correction-head metrics (Phase 1 a2c2-correction feature)
+#
+# Per a2c2-correction execution plan B.5 Day 3: emit applied vs skipped
+# counters with a `reason` label so operators can graph the auto-skip
+# behavior. Bounded reasons: applied | cold_start | low_latency |
+# high_success.
+# ---------------------------------------------------------------------------
+
+reflex_a2c2_applied_total = Counter(
+    "reflex_a2c2_applied_total",
+    "Cumulative A2C2 correction applications",
+    labelnames=("reason",),  # "applied"
+    registry=REGISTRY,
+)
+reflex_a2c2_skipped_total = Counter(
+    "reflex_a2c2_skipped_total",
+    "Cumulative A2C2 skips by reason",
+    labelnames=("reason",),  # cold_start | low_latency | high_success
+    registry=REGISTRY,
+)
+
+
+def inc_a2c2_applied(reason: str) -> None:
+    reflex_a2c2_applied_total.labels(reason=reason).inc()
+
+
+def inc_a2c2_skipped(reason: str) -> None:
+    reflex_a2c2_skipped_total.labels(reason=reason).inc()
+
+
+# ---------------------------------------------------------------------------
 # Render
 # ---------------------------------------------------------------------------
 
