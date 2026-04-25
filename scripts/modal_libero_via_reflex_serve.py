@@ -1,0 +1,460 @@
+"""LIBERO eval routed through reflex serve HTTP -- closes B.5 Day 5
++ b4 gate methodology gap.
+
+The existing scripts/modal_libero_monolithic_onnx.py BYPASSES reflex
+serve and calls the ONNX session directly. That validates the model
+correctness but skips ALL the wedges (action_guard, RTC, A2C2,
+record-replay, prometheus, policy-versioning, chunk-budget-batching).
+For the B.5 Day 5 deliverable ("LIBERO success delta with A2C2-on vs
+A2C2-off"), we need LIBERO actions to flow through the actual /act
+handler -- otherwise the A2C2 hook isn't exercised.
+
+Per ADR 2026-04-25-decomposed-dispatch-via-reflex-serve §"Validation
+experiments to file" #2: this is the LIBERO-via-reflex-serve harness.
+
+Architecture:
+- Single Modal A100 container
+- Spawn `reflex serve <decomposed_export>` as subprocess (uses the
+  Pi05DecomposedServer dispatch shipped in commit cfb846d today)
+- Wait for /health
+- Boot LIBERO + run episodes; for each step, POST /act with
+  base64-encoded image + instruction + state, parse response, step env
+- Two runs: A2C2-off (baseline) + A2C2-on (--a2c2-checkpoint <head>)
+- Compare success rates
+
+Phase 1 status: SUBSTRATE only. Each piece (subprocess spawn, HTTP
+client, LIBERO episode loop) is validated independently in code; the
+end-to-end Modal run is the next-session validation. ~$5-10 to
+validate when fired.
+
+Usage (when ready to fire):
+    modal run scripts/modal_libero_via_reflex_serve.py
+    modal run scripts/modal_libero_via_reflex_serve.py --num-episodes 3 --tasks 0
+    modal run scripts/modal_libero_via_reflex_serve.py --a2c2-checkpoint /a2c2/head.pt
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import modal
+
+app = modal.App("reflex-libero-via-reflex-serve")
+
+
+def _hf_secret():
+    token = os.environ.get("HF_TOKEN", "")
+    if token:
+        return modal.Secret.from_dict({"HF_TOKEN": token})
+    try:
+        return modal.Secret.from_name("huggingface")
+    except Exception:
+        return modal.Secret.from_dict({})
+
+
+def _repo_head_sha() -> str:
+    try:
+        cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=cwd,
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()[:12]
+    except Exception:
+        return "main"
+
+
+def _build_bust() -> str:
+    import time
+    return str(int(time.time()))
+
+
+_HEAD = _repo_head_sha()
+_BUILD_BUST = _build_bust()
+
+
+# Same volume layout as modal_libero_monolithic_onnx.py + the gate output
+# volume so a2c2 heads from modal_b4_gate_fire are reachable.
+hf_cache = modal.Volume.from_name("pi0-hf-cache", create_if_missing=True)
+onnx_output = modal.Volume.from_name("pi0-onnx-outputs", create_if_missing=True)
+gate_output = modal.Volume.from_name("a2c2-gate-output", create_if_missing=True)
+HF_CACHE_PATH = "/root/.cache/huggingface"
+ONNX_OUTPUT_PATH = "/onnx_out"
+GATE_OUTPUT_PATH = "/gate_out"
+
+
+# Image: same shape as modal_libero (LIBERO + osmesa + MuJoCo) + the
+# reflex-vla install + httpx for the HTTP client.
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install(
+        "git", "libgl1-mesa-glx", "libglib2.0-0", "libegl1-mesa",
+        "libglvnd0", "ffmpeg", "cmake", "build-essential",
+        "libosmesa6", "libosmesa6-dev", "clang",
+    )
+    .pip_install(
+        "torch", "safetensors>=0.4.0", "huggingface_hub",
+        "transformers<5.4,>=4.40", "numpy", "Pillow", "pydantic>=2.0",
+        "pyyaml", "onnx>=1.16", "onnxruntime-gpu>=1.20",
+        "onnxscript>=0.1", "mujoco==3.3.2", "robosuite==1.4.1", "h5py",
+        "bddl==1.0.1", "future", "robomimic", "hydra-core>=1.1",
+        "easydict", "einops", "opencv-python-headless",
+        "gym", "gymnasium", "lerobot==0.5.1", "num2words", "imageio",
+        "httpx>=0.24",  # for the HTTP client to reflex serve
+    )
+    .run_commands(
+        "git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git /opt/LIBERO"
+        " && cd /opt/LIBERO && pip install . --no-deps"
+    )
+    .add_local_file("scripts/patch_libero.py", "/root/patch_libero.py", copy=True)
+    .run_commands("python /root/patch_libero.py")
+    .env({
+        "MUJOCO_GL": "osmesa",
+        "PYOPENGL_PLATFORM": "osmesa",
+        "LIBERO_DATA_DIR": "/tmp/libero_data",
+        "LIBERO_ASSET_DIR": "/opt/LIBERO/libero/libero/assets",
+        "LIBERO_BASE": "/tmp/libero_data",
+        "PYTHONPATH": "/opt/LIBERO",
+    })
+    .run_commands(
+        "mkdir -p /tmp/libero_data",
+        # Bust the layer cache so reflex-vla pip install picks up the
+        # latest SHA on every modal run.
+        f'echo "build_bust={_BUILD_BUST}"',
+        f'pip install "reflex-vla[serve,gpu] @ git+https://x-access-token:$GITHUB_TOKEN@github.com/rylinjames/reflex-vla@{_HEAD}"',
+        secrets=[modal.Secret.from_name("github-token")],
+    )
+)
+
+
+# Constants mirror modal_libero_monolithic_onnx.py
+LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
+LIBERO_ENV_RESOLUTION = 256
+TASK_SUITE_MAX_STEPS = {
+    "libero_spatial": 220,
+    "libero_object": 280,
+    "libero_goal": 300,
+    "libero_10": 520,
+    "libero_90": 400,
+}
+
+
+@app.function(
+    image=image,
+    gpu="A100-80GB",
+    timeout=7200,  # 2 hr cap; LIBERO + serve startup + episode runs
+    volumes={
+        HF_CACHE_PATH: hf_cache,
+        ONNX_OUTPUT_PATH: onnx_output,
+        GATE_OUTPUT_PATH: gate_output,
+    },
+    secrets=[_hf_secret()],
+)
+def libero_via_serve(
+    export_subdir: str = "distill_v050r2_decomposed",
+    num_episodes: int = 1,
+    task_suite_name: str = "libero_10",
+    task_indices: list[int] | None = None,
+    a2c2_checkpoint: str = "",
+    seed: int = 7,
+    serve_health_timeout_s: int = 480,
+    serve_port: int = 8000,
+) -> dict:
+    """Run LIBERO episodes against a reflex serve subprocess.
+
+    Args:
+        export_subdir: subfolder under /onnx_out/ -- the decomposed export
+            to serve (e.g., distill_v050r2_decomposed).
+        num_episodes: episodes per task (default 1 for smoke; 50 for full).
+        task_suite_name: libero_10 | libero_spatial | libero_object | libero_goal | libero_90.
+        task_indices: list of task ids; None = all tasks in suite.
+        a2c2_checkpoint: path to A2C2 head .pt (e.g.,
+            /gate_out/run_001/a2c2_head.pt). Empty = baseline (no A2C2).
+        seed: RNG seed.
+        serve_health_timeout_s: how long to wait for reflex serve /health.
+        serve_port: port for the reflex serve subprocess.
+
+    Returns:
+        {"status": "ok"|"fail", "success_rate_pct": float, "per_task": [...],
+         "errors": [...], "a2c2_active": bool, "total_steps": int}
+    """
+    import base64
+    import io
+    import json
+    import math
+    import sys
+    import time
+    import traceback
+    import urllib.request
+    import urllib.error
+    from pathlib import Path
+
+    import numpy as np
+    from PIL import Image
+
+    # PyTorch 2.6+ weights_only=True refuses LIBERO init states.
+    import torch
+    _orig_torch_load = torch.load
+    def _compat_load(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return _orig_torch_load(*args, **kwargs)
+    torch.load = _compat_load
+
+    export_dir = f"{ONNX_OUTPUT_PATH}/{export_subdir}"
+    print(f"[libero_via_serve] export_dir={export_dir} a2c2={a2c2_checkpoint or '(none)'}")
+
+    # ---- Spawn reflex serve subprocess ----
+    serve_cmd = [
+        "reflex", "serve", export_dir,
+        "--port", str(serve_port),
+        "--device", "cuda",
+        "--no-strict-providers",
+        "--no-prewarm",  # /health flips ready immediately; first /act pays JIT cost
+    ]
+    if a2c2_checkpoint:
+        serve_cmd.extend(["--a2c2-checkpoint", a2c2_checkpoint])
+
+    print(f"[libero_via_serve] starting: {' '.join(serve_cmd)}")
+    serve_proc = subprocess.Popen(
+        serve_cmd,
+        env={**os.environ},
+    )
+
+    def _wait_for_health(url: str, timeout_s: int) -> bool:
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            try:
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    if r.status == 200:
+                        elapsed = time.time() - t0
+                        print(f"  /health OK after {elapsed:.1f}s")
+                        return True
+            except Exception:
+                pass
+            time.sleep(2)
+        return False
+
+    health_url = f"http://127.0.0.1:{serve_port}/health"
+    if not _wait_for_health(health_url, serve_health_timeout_s):
+        serve_proc.terminate()
+        return {
+            "status": "fail",
+            "reason": f"reflex serve didn't come up in {serve_health_timeout_s}s",
+        }
+
+    # ---- HTTP client helper ----
+    def _post_act(image_arr: np.ndarray, instruction: str, state: list[float], episode_id: str) -> dict:
+        """POST one /act request + return the parsed response."""
+        # Encode the image as base64 PNG (decoder is server-side via PIL)
+        buf = io.BytesIO()
+        Image.fromarray(image_arr).save(buf, format="PNG")
+        img_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        payload = {
+            "image": img_b64,
+            "instruction": instruction,
+            "state": state,
+            "episode_id": episode_id,
+        }
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{serve_port}/act",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read())
+
+    try:
+        # ---- LIBERO setup ----
+        np.random.seed(seed)
+        from libero.libero import benchmark, get_libero_path
+        from libero.libero.envs import OffScreenRenderEnv
+
+        benchmark_dict = benchmark.get_benchmark_dict()
+        task_suite = benchmark_dict[task_suite_name]()
+        num_tasks_in_suite = task_suite.n_tasks
+        max_steps = TASK_SUITE_MAX_STEPS[task_suite_name]
+        print(f"[libero_via_serve] suite={task_suite_name}, num_tasks={num_tasks_in_suite}, max_steps={max_steps}")
+
+        def _quat2axisangle(quat):
+            if quat[3] > 1.0: quat[3] = 1.0
+            elif quat[3] < -1.0: quat[3] = -1.0
+            den = np.sqrt(1.0 - quat[3] * quat[3])
+            if math.isclose(den, 0.0):
+                return np.zeros(3)
+            return (quat[:3] * 2.0 * math.acos(quat[3])) / den
+
+        def _build_env(task):
+            task_bddl_file = (
+                Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
+            )
+            env = OffScreenRenderEnv(
+                bddl_file_name=str(task_bddl_file),
+                camera_heights=LIBERO_ENV_RESOLUTION,
+                camera_widths=LIBERO_ENV_RESOLUTION,
+            )
+            env.seed(seed)
+            return env
+
+        results = {
+            "status": "ok",
+            "export_subdir": export_subdir,
+            "a2c2_active": bool(a2c2_checkpoint),
+            "a2c2_checkpoint": a2c2_checkpoint,
+            "suite": task_suite_name,
+            "num_episodes_per_task": num_episodes,
+            "max_steps": max_steps,
+            "per_task": [],
+            "total_success": 0,
+            "total_eps": 0,
+            "total_steps": 0,
+            "errors": [],
+        }
+
+        tasks_to_run = task_indices if task_indices is not None else list(range(num_tasks_in_suite))
+        print(f"[libero_via_serve] tasks: {tasks_to_run}")
+
+        for task_idx in tasks_to_run:
+            task = task_suite.get_task(task_idx)
+            task_description = task.language
+            print(f"\n[libero_via_serve] TASK {task_idx}: {task_description!r}")
+            initial_states = task_suite.get_task_init_states(task_idx)
+
+            env = _build_env(task)
+            task_start = time.time()
+            task_result = {
+                "task_idx": task_idx,
+                "task_description": task_description,
+                "episodes": [],
+                "success": 0, "total": 0,
+            }
+
+            for ep in range(num_episodes):
+                try:
+                    env.reset()
+                    init_idx = ep % len(initial_states)
+                    obs = env.set_init_state(initial_states[init_idx])
+                    episode_id = f"ep_{task_idx:02d}_{ep:02d}"
+                    t = 0
+                    done = False
+                    n_steps = 0
+                    while t < max_steps:
+                        try:
+                            agent_img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+                            state_vec = np.concatenate([
+                                np.asarray(obs["robot0_eef_pos"], dtype=np.float32),
+                                _quat2axisangle(np.asarray(obs["robot0_eef_quat"], dtype=np.float32).copy()),
+                                np.asarray(obs["robot0_gripper_qpos"], dtype=np.float32),
+                            ]).astype(np.float32).tolist()
+                            resp = _post_act(
+                                agent_img, task_description, state_vec, episode_id,
+                            )
+                            if "error" in resp:
+                                raise RuntimeError(f"/act error: {resp['error']}")
+                            actions = resp.get("actions") or []
+                            if not actions:
+                                raise RuntimeError("/act returned empty actions")
+                            # Take the first action of the chunk (chunk-by-chunk replan)
+                            action = np.asarray(actions[0], dtype=np.float32)
+                            obs, _, done, info = env.step(action.tolist())
+                            n_steps += 1
+                            t += 1
+                            if done:
+                                task_result["success"] += 1
+                                results["total_success"] += 1
+                                break
+                        except Exception as exc:
+                            err_tb = traceback.format_exc()
+                            print(f"  step error: {exc}")
+                            print(err_tb[-500:])
+                            results["errors"].append({
+                                "task": task_idx, "ep": ep,
+                                "error": str(exc), "tb": err_tb[-400:],
+                            })
+                            break
+                    task_result["episodes"].append({
+                        "ep": int(ep),
+                        "init_idx": int(init_idx),
+                        "steps": int(t),
+                        "success": bool(done),
+                    })
+                    task_result["total"] += 1
+                    results["total_eps"] += 1
+                    results["total_steps"] += n_steps
+                    print(f"  ep {ep} (init={init_idx}): {'SUCCESS' if done else 'fail'} at {t} steps ({time.time()-task_start:.1f}s total)")
+                except Exception as exc:
+                    err_tb = traceback.format_exc()
+                    print(f"  episode error: {exc}")
+                    print(err_tb[-500:])
+                    results["errors"].append({
+                        "task": task_idx, "ep": ep,
+                        "error": str(exc), "tb": err_tb[-400:],
+                    })
+                    task_result["total"] += 1
+                    results["total_eps"] += 1
+            results["per_task"].append(task_result)
+            print(f"[libero_via_serve] task {task_idx} done: {task_result['success']}/{task_result['total']}")
+            try:
+                env.close()
+            except Exception:
+                pass
+
+        success_rate = (
+            100.0 * results["total_success"] / results["total_eps"]
+            if results["total_eps"] else 0.0
+        )
+        results["success_rate_pct"] = round(success_rate, 1)
+        print(f"\n====== {task_suite_name} via reflex serve (a2c2={a2c2_checkpoint or 'off'}) ======")
+        print(f"  Export:  {export_subdir}")
+        print(f"  Success: {results['total_success']}/{results['total_eps']} = {success_rate:.1f}%")
+        return results
+    finally:
+        # Always terminate the serve subprocess.
+        print("[libero_via_serve] shutting down reflex serve...")
+        serve_proc.terminate()
+        try:
+            serve_proc.wait(20)
+        except subprocess.TimeoutExpired:
+            serve_proc.kill()
+
+
+@app.local_entrypoint()
+def main(
+    export_subdir: str = "distill_v050r2_decomposed",
+    num_episodes: int = 1,
+    tasks: str = "0",
+    suite: str = "libero_10",
+    a2c2_checkpoint: str = "",
+):
+    """Run LIBERO via reflex serve.
+
+    --tasks "0"          single task
+    --tasks "0,1,2"      3 tasks
+    --tasks "all"        full suite
+    --a2c2-checkpoint /gate_out/.../a2c2_head.pt   enable A2C2
+    """
+    if tasks == "all":
+        task_list = None
+    else:
+        task_list = [int(t) for t in tasks.split(",")]
+    print(f"Running LIBERO {suite} via reflex serve: tasks={task_list or 'all'}, "
+          f"{num_episodes} eps each, a2c2={a2c2_checkpoint or '(off)'}")
+    r = libero_via_serve.remote(
+        export_subdir=export_subdir,
+        num_episodes=num_episodes,
+        task_suite_name=suite,
+        task_indices=task_list,
+        a2c2_checkpoint=a2c2_checkpoint,
+    )
+    print("\n=== RESULT ===")
+    if r.get("status") == "fail":
+        print(f"  status: FAIL")
+        print(f"  reason: {r.get('reason', '(no reason)')}")
+        return
+    print(f"  status:        {r.get('status')}")
+    print(f"  export:        {r.get('export_subdir')}")
+    print(f"  a2c2_active:   {r.get('a2c2_active')}")
+    print(f"  success_rate:  {r.get('success_rate_pct', '?')}%")
+    print(f"  total:         {r.get('total_success', '?')}/{r.get('total_eps', '?')}")
+    print(f"  total_steps:   {r.get('total_steps', '?')}")
+    print(f"  errors:        {len(r.get('errors', []))}")
+    for task in r.get("per_task", []):
+        print(f"  task {task['task_idx']}: {task['success']}/{task['total']} -- {task['task_description'][:60]}")
