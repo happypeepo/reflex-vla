@@ -457,3 +457,155 @@ def test_save_creates_parent_directory(tmp_path):
     cache = CalibrationCache(reflex_version="0.5.0")
     cache.save(nested / "cache.json")
     assert (nested / "cache.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# measure_latency_profile (Day 2)
+# ---------------------------------------------------------------------------
+
+
+from reflex.runtime.calibration import measure_latency_profile  # noqa: E402
+
+
+def test_measure_rejects_zero_n_iters():
+    with pytest.raises(ValueError, match="n_iters"):
+        measure_latency_profile(lambda: None, n_iters=0)
+
+
+def test_measure_rejects_negative_warmup():
+    with pytest.raises(ValueError, match="warmup_iters"):
+        measure_latency_profile(lambda: None, warmup_iters=-1)
+
+
+def test_measure_rejects_outlier_trim_at_or_above_half():
+    with pytest.raises(ValueError, match="outlier_trim_frac"):
+        measure_latency_profile(lambda: None, outlier_trim_frac=0.5)
+
+
+def test_measure_rejects_negative_outlier_trim():
+    with pytest.raises(ValueError, match="outlier_trim_frac"):
+        measure_latency_profile(lambda: None, outlier_trim_frac=-0.01)
+
+
+def test_measure_rejects_non_callable():
+    with pytest.raises(TypeError, match="callable"):
+        measure_latency_profile(42)  # type: ignore[arg-type]
+
+
+def test_measure_calls_warmup_then_measurement():
+    """Warmup forwards count toward total invocations but not measurements."""
+    invocations = {"n": 0}
+
+    def predict():
+        invocations["n"] += 1
+
+    quality = measure_latency_profile(
+        predict, n_iters=10, warmup_iters=3, outlier_trim_frac=0.0,
+    )
+    assert invocations["n"] == 13  # 3 warmup + 10 measured
+    assert quality.measurement_iters == 10
+    assert quality.warmup_iters == 3
+
+
+def test_measure_propagates_predict_exception():
+    """Calibration must fail loud on a broken predict path — no silent
+    averaging over crashes."""
+    def predict():
+        raise RuntimeError("policy crashed")
+
+    with pytest.raises(RuntimeError, match="policy crashed"):
+        measure_latency_profile(predict, n_iters=10, warmup_iters=0)
+
+
+def test_measure_returns_positive_median_for_real_work():
+    """A predict that does some work produces a positive median wall-clock."""
+    import math
+
+    def predict():
+        # Cheap CPU-bound work to make the measurement non-trivial
+        x = 0.0
+        for i in range(10_000):
+            x += math.sin(i)
+
+    quality = measure_latency_profile(predict, n_iters=20, warmup_iters=2)
+    assert quality.median_ms > 0
+    assert quality.p99_ms >= quality.median_ms  # p99 is at least the median
+
+
+def test_measure_outlier_count_matches_trim_fraction():
+    """Trimming N=100 with frac=0.05 drops 2*5 = 10 outliers."""
+    quality = measure_latency_profile(
+        lambda: None, n_iters=100, warmup_iters=0, outlier_trim_frac=0.05,
+    )
+    assert quality.n_outliers_dropped == 10
+
+
+def test_measure_outlier_count_zero_when_trim_zero():
+    quality = measure_latency_profile(
+        lambda: None, n_iters=100, warmup_iters=0, outlier_trim_frac=0.0,
+    )
+    assert quality.n_outliers_dropped == 0
+
+
+def test_measure_quality_score_high_for_constant_work():
+    """A perfectly stable workload should score near 1.0."""
+    # Use a no-op so wall-clock variance is dominated by clock noise
+    # (small) rather than real compute variance.
+    quality = measure_latency_profile(
+        lambda: None, n_iters=100, warmup_iters=10,
+    )
+    # Even a no-op has tiny perf_counter jitter; CV is usually well under
+    # 0.10 → quality_score should be at the top.
+    assert quality.quality_score >= 0.5, (
+        f"no-op should produce stable measurements, got "
+        f"quality_score={quality.quality_score}, median={quality.median_ms}"
+    )
+
+
+def test_measure_quality_score_zero_for_high_cv():
+    """A workload with very high coefficient of variation should score 0.
+
+    Force this by having predict alternate between cheap and expensive paths
+    so the trimmed samples still have CV above the noisy threshold."""
+    import time as _time
+    state = {"i": 0}
+
+    def predict():
+        state["i"] += 1
+        # 50 fast (no-op) + 50 slow (sleep 1ms) samples
+        if state["i"] % 2 == 0:
+            _time.sleep(0.005)  # 5ms
+        # else: ~0ms
+
+    quality = measure_latency_profile(
+        predict, n_iters=100, warmup_iters=0, outlier_trim_frac=0.0,
+    )
+    # CV should be huge given the bimodal distribution — quality near 0
+    assert quality.quality_score < 0.5, (
+        f"bimodal workload should produce low quality_score, got "
+        f"{quality.quality_score} (median={quality.median_ms}, p99={quality.p99_ms})"
+    )
+
+
+def test_measure_p99_at_or_above_median():
+    """p99 should never be below the median by construction."""
+    import math
+
+    def predict():
+        x = 0.0
+        for i in range(5_000):
+            x += math.cos(i)
+
+    quality = measure_latency_profile(predict, n_iters=50, warmup_iters=2)
+    assert quality.p99_ms >= quality.median_ms
+
+
+def test_measure_default_args_runs_clean():
+    """The 100-iter default with 10 warmup completes quickly + returns
+    a sensible MeasurementQuality on a no-op predict."""
+    quality = measure_latency_profile(lambda: None)
+    assert isinstance(quality, MeasurementQuality)
+    assert quality.measurement_iters == 100
+    assert quality.warmup_iters == 10
+    assert quality.median_ms >= 0
+    assert 0.0 <= quality.quality_score <= 1.0

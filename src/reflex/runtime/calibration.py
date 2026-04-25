@@ -535,6 +535,157 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+# ---------------------------------------------------------------------------
+# Measurement harness (Day 2)
+# ---------------------------------------------------------------------------
+
+
+# Default tail-trim for outlier rejection. 5% on each side drops single
+# noisy outliers (GC pause, kernel scheduler hiccup) without distorting
+# the median. Bench-revamp methodology defaults match (cf. bench/methodology.py).
+_DEFAULT_OUTLIER_TRIM_FRAC = 0.05
+
+# Quality-score thresholds mapping coefficient-of-variation (std / median)
+# to a [0, 1] confidence. Below CLEAN, full credit; between CLEAN and NOISY,
+# linear ramp; above NOISY, zero. Tuned so that healthy A10G measurements
+# (typically CV ~ 0.05) score ~1.0 and obviously thrashing measurements
+# (CV > 0.30) score 0 — refuses-to-write threshold downstream.
+_QUALITY_CV_CLEAN = 0.10
+_QUALITY_CV_NOISY = 0.30
+
+
+def measure_latency_profile(
+    predict_callable,
+    *,
+    n_iters: int = 100,
+    warmup_iters: int = 10,
+    outlier_trim_frac: float = _DEFAULT_OUTLIER_TRIM_FRAC,
+) -> MeasurementQuality:
+    """Bench-style timing harness.
+
+    Args:
+        predict_callable: zero-argument function that runs ONE forward pass.
+            Caller is responsible for binding inputs (closure / partial).
+        n_iters: number of measured forwards. Default 100 — enough for
+            stable p99; small enough to keep calibration sub-second on
+            cheap inferences.
+        warmup_iters: number of pre-measurement forwards to discard.
+            Default 10 — covers JIT warmup + ORT cuDNN algo selection.
+        outlier_trim_frac: fraction of the SORTED measurements to drop
+            from each tail (default 0.05 = 5% each side). Catches GC
+            pauses + scheduler hiccups without distorting the median.
+
+    Returns:
+        A MeasurementQuality with median_ms + p99_ms + n_outliers_dropped
+        + quality_score derived from coefficient of variation.
+
+    Raises:
+        ValueError: on invalid args. predict_callable exceptions are
+            propagated unchanged — calibration must fail loud on a
+            broken predict path, not silently average over crashes.
+    """
+    if n_iters < 1:
+        raise ValueError(f"n_iters must be >= 1, got {n_iters}")
+    if warmup_iters < 0:
+        raise ValueError(f"warmup_iters must be >= 0, got {warmup_iters}")
+    if not (0.0 <= outlier_trim_frac < 0.5):
+        raise ValueError(
+            f"outlier_trim_frac must be in [0, 0.5), got {outlier_trim_frac}"
+        )
+    if not callable(predict_callable):
+        raise TypeError("predict_callable must be a callable")
+
+    # Warmup — discarded.
+    for _ in range(warmup_iters):
+        predict_callable()
+
+    # Measurement.
+    samples_ms: list[float] = []
+    for _ in range(n_iters):
+        t0 = time.perf_counter()
+        predict_callable()
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        samples_ms.append(elapsed_ms)
+
+    # Outlier rejection: trim equal fraction from each tail.
+    samples_ms.sort()
+    k = int(n_iters * outlier_trim_frac)
+    n_outliers_dropped = 2 * k
+    trimmed = samples_ms[k:n_iters - k] if k > 0 else samples_ms
+
+    # Defensive: if trimming removed everything (shouldn't happen with valid
+    # args), fall back to the un-trimmed samples to keep invariants sane.
+    if not trimmed:
+        trimmed = samples_ms
+        n_outliers_dropped = 0
+
+    median_ms = _median(trimmed)
+    p99_ms = _percentile(trimmed, 0.99)
+    quality_score = _quality_score(trimmed, median_ms)
+
+    return MeasurementQuality(
+        warmup_iters=warmup_iters,
+        measurement_iters=n_iters,
+        median_ms=float(median_ms),
+        p99_ms=float(p99_ms),
+        n_outliers_dropped=n_outliers_dropped,
+        quality_score=float(quality_score),
+    )
+
+
+def _median(sorted_values: list[float]) -> float:
+    n = len(sorted_values)
+    if n == 0:
+        return 0.0
+    if n % 2 == 1:
+        return sorted_values[n // 2]
+    return 0.5 * (sorted_values[n // 2 - 1] + sorted_values[n // 2])
+
+
+def _percentile(sorted_values: list[float], q: float) -> float:
+    """Linear-interp percentile q in [0, 1] over a SORTED list."""
+    n = len(sorted_values)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return sorted_values[0]
+    pos = q * (n - 1)
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return sorted_values[lo] * (1.0 - frac) + sorted_values[hi] * frac
+
+
+def _quality_score(samples_ms: list[float], median_ms: float) -> float:
+    """Map coefficient-of-variation (std / median) to a [0, 1] quality.
+
+    CV <= CLEAN (0.10) → 1.0 (high confidence)
+    CV >= NOISY (0.30) → 0.0 (refuse to write downstream)
+    Linear ramp between.
+
+    Sub-microsecond medians are dominated by `perf_counter` jitter and
+    don't reflect real workload variance — return 1.0 in that case. The
+    floor is 0.001 ms (1 µs) which is well above clock resolution but
+    below any meaningful inference cost on supported hardware.
+    """
+    n = len(samples_ms)
+    if n < 2 or median_ms <= 0:
+        return 0.0
+    if median_ms < 0.001:
+        # Below clock-jitter floor — nothing to measure; treat as clean.
+        return 1.0
+    mean = sum(samples_ms) / n
+    var = sum((x - mean) ** 2 for x in samples_ms) / (n - 1)
+    std = var ** 0.5
+    cv = std / median_ms
+    if cv <= _QUALITY_CV_CLEAN:
+        return 1.0
+    if cv >= _QUALITY_CV_NOISY:
+        return 0.0
+    # Linear ramp between CLEAN and NOISY
+    return 1.0 - (cv - _QUALITY_CV_CLEAN) / (_QUALITY_CV_NOISY - _QUALITY_CV_CLEAN)
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "DEFAULT_STALE_AFTER_DAYS",
@@ -545,4 +696,5 @@ __all__ = [
     "MeasurementContext",
     "CalibrationEntry",
     "CalibrationCache",
+    "measure_latency_profile",
 ]
