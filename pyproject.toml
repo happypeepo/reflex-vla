@@ -141,3 +141,11 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pytest-asyncio v1.x requires explicit mode declaration. Tests use
+# @pytest.mark.asyncio decorators (strict mode); auto mode treats every
+# async def as an async test which we don't want (some async helpers
+# inside sync tests would be misinterpreted).
+asyncio_mode = "strict"
+markers = [
+    "asyncio: mark a coroutine test for pytest-asyncio (strict mode)",
+]
