@@ -75,24 +75,23 @@ image = (
 )
 
 
-@app.function(
-    image=image,
-    gpu="A10G",
-    timeout=600,  # 10 min cap -- calibration substrate is fast
-    secrets=[_hf_secret()],
-)
-def probe_calibration_a10g() -> dict:
-    """Probe HardwareFingerprint + measure_latency_profile on Modal A10G.
+def _probe_inner(tier: str) -> dict:
+    """Shared body for both A10G + A100 probe functions.
 
-    Returns a dict with the probed fingerprint + measurement quality so
-    the local entrypoint can render a structured RESULT block + assert.
+    Probes HardwareFingerprint + runs measure_latency_profile against
+    a synthetic numpy predict + validates CalibrationCache load_or_empty
+    + is_stale + persist + reload (cache hit on second open).
     """
     import time
     import numpy as np
+    from pathlib import Path
 
-    print("[calibration] probing HardwareFingerprint...")
+    print(f"[calibration] tier={tier} probing HardwareFingerprint...")
     from reflex.runtime.calibration import (
+        CalibrationCache,
+        CalibrationEntry,
         HardwareFingerprint,
+        MeasurementContext,
         measure_latency_profile,
     )
 
@@ -108,29 +107,21 @@ def probe_calibration_a10g() -> dict:
 
     print("[calibration] running measure_latency_profile against a synthetic predict...")
 
-    # Synthetic predict: 1ms-ish busy work that exercises the timing
-    # harness without needing a real model loaded. Validates the
-    # measurement pipeline (warmup -> N-iter loop -> outlier trim ->
-    # median/p99/quality_score).
     def _stub_predict():
-        # ~0.5-2ms of numpy work; enough to be measurable without
-        # being trivially nondeterministic.
         a = np.random.rand(128, 128).astype(np.float32)
         b = np.random.rand(128, 128).astype(np.float32)
         c = a @ b
         return c.sum()
 
     quality = measure_latency_profile(
-        _stub_predict,
-        n_iters=100,
-        warmup_iters=10,
+        _stub_predict, n_iters=100, warmup_iters=10,
     )
     print(f"[calibration]   median_ms: {quality.median_ms:.4f}")
     print(f"[calibration]   p99_ms: {quality.p99_ms:.4f}")
     print(f"[calibration]   quality_score: {quality.quality_score:.4f}")
     print(f"[calibration]   n_outliers_dropped: {quality.n_outliers_dropped}")
 
-    # Assertions: invariants the substrate guarantees.
+    # Substrate invariants
     assert quality.median_ms > 0, "median_ms must be > 0"
     assert quality.p99_ms >= quality.median_ms, "p99_ms must be >= median_ms"
     assert 0.0 <= quality.quality_score <= 1.0, (
@@ -138,9 +129,66 @@ def probe_calibration_a10g() -> dict:
     )
     assert quality.n_outliers_dropped >= 0, "n_outliers_dropped must be >= 0"
 
+    # Day 7 expansion: validate CalibrationCache round-trip on Modal disk.
+    # Confirms the cache primitive works under the same fingerprint state
+    # the running server would see; surfaces any json-serialization edge
+    # cases that local-only tests can miss.
+    print("[calibration] validating CalibrationCache round-trip...")
+    cache_path = Path("/tmp/reflex_calibration_smoke.json")
+    if cache_path.exists():
+        cache_path.unlink()
+
+    # First load -> empty
+    cache_v1 = CalibrationCache.load_or_empty(str(cache_path))
+    assert len(cache_v1.entries) == 0, (
+        f"fresh cache must be empty, got {len(cache_v1.entries)} entries"
+    )
+    # First load is stale (no fingerprint persisted yet)
+    assert cache_v1.is_stale(fp), "fresh cache must be stale"
+
+    # Add a synthetic entry
+    ctx = MeasurementContext(
+        knob="latency_compensation_ms",
+        scope_key=f"{tier}-synthetic-stub",
+        runtime_kind="onnx",
+    )
+    entry = CalibrationEntry(
+        fingerprint=fp,
+        context=ctx,
+        value=float(quality.median_ms),
+        quality=quality,
+    )
+    cache_v1.upsert(entry)
+    cache_v1.persist(str(cache_path))
+
+    # Reopen -> hit (1 entry, fingerprint matches -> not stale)
+    cache_v2 = CalibrationCache.load_or_empty(str(cache_path))
+    assert len(cache_v2.entries) == 1, (
+        f"reloaded cache should have 1 entry, got {len(cache_v2.entries)}"
+    )
+    assert not cache_v2.is_stale(fp), (
+        "reloaded cache with matching fingerprint must NOT be stale"
+    )
+    print(f"[calibration]   cache round-trip: persist + reload = {len(cache_v2.entries)} entries (hit)")
+
+    # is_stale=True when fingerprint differs (simulate driver upgrade)
+    fake_fp = HardwareFingerprint(
+        gpu_uuid=fp.gpu_uuid, gpu_name=fp.gpu_name,
+        driver_version_major=fp.driver_version_major + 1,  # bumped
+        driver_version_minor=fp.driver_version_minor,
+        cuda_version_major=fp.cuda_version_major,
+        cuda_version_minor=fp.cuda_version_minor,
+        kernel_release=fp.kernel_release, cpu_count=fp.cpu_count,
+        ram_gb=fp.ram_gb, reflex_version=fp.reflex_version,
+    )
+    assert cache_v2.is_stale(fake_fp), (
+        "cache must be stale when fingerprint differs (driver bump)"
+    )
+    print("[calibration]   cache invalidation: differing fingerprint -> stale ✓")
+
     return {
         "status": "ok",
-        "tier": "A10G",
+        "tier": tier,
         "fingerprint": fp.to_dict(),
         "quality": {
             "median_ms": quality.median_ms,
@@ -150,33 +198,91 @@ def probe_calibration_a10g() -> dict:
             "measurement_iters": quality.measurement_iters,
             "n_outliers_dropped": quality.n_outliers_dropped,
         },
+        "cache": {
+            "entries_persisted": 1,
+            "reload_hit": True,
+            "stale_on_fingerprint_change": True,
+        },
     }
 
 
+@app.function(
+    image=image,
+    gpu="A10G",
+    timeout=600,
+    secrets=[_hf_secret()],
+)
+def probe_calibration_a10g() -> dict:
+    """Probe + cache round-trip on Modal A10G."""
+    return _probe_inner("A10G")
+
+
+@app.function(
+    image=image,
+    gpu="A100-80GB",
+    timeout=600,
+    secrets=[_hf_secret()],
+)
+def probe_calibration_a100() -> dict:
+    """Probe + cache round-trip on Modal A100-80GB.
+
+    Validates that the calibration substrate produces SAME-SHAPE output
+    on a different GPU tier (i.e., the median_ms differs but all the
+    structural invariants still hold).
+    """
+    return _probe_inner("A100-80GB")
+
+
 @app.local_entrypoint()
-def main():
-    """Local entry: invoke the A10G probe + render the RESULT block."""
+def main(skip_a100: bool = False):
+    """Local entry: invoke both tiers + render the RESULT block.
+
+    --skip-a100 runs only A10G (~$0.50). Default runs both (~$3 total).
+    """
     print("=" * 70)
-    print("Auto-calibration matrix smoke -- Phase 1 minimum (A10G only)")
+    print("Auto-calibration matrix -- A10G + A100-80GB cross-hardware")
     print("=" * 70)
-    r = probe_calibration_a10g.remote()
-    print("\n=== RESULT ===")
-    if r.get("status") == "fail":
-        print(f"  status: FAIL")
-        print(f"  reason: {r.get('reason', '(no reason)')}")
-        return
-    print(f"  status: {r['status']}")
-    print(f"  tier:   {r['tier']}")
-    fp = r["fingerprint"]
-    print(f"  gpu:    {fp['gpu_name']!r} (uuid={fp['gpu_uuid'][:16]!r}...)")
-    print(f"  driver: {fp['driver_version_major']}.{fp['driver_version_minor']}")
-    print(f"  cuda:   {fp['cuda_version_major']}.{fp['cuda_version_minor']}")
-    print(f"  kernel: {fp['kernel_release']!r}")
-    print(f"  cpu:    {fp['cpu_count']}")
-    print(f"  ram:    {fp['ram_gb']}GB")
-    print(f"  reflex: {fp['reflex_version']}")
-    q = r["quality"]
-    print(f"  median: {q['median_ms']:.4f} ms")
-    print(f"  p99:    {q['p99_ms']:.4f} ms")
-    print(f"  quality_score: {q['quality_score']:.4f}")
-    print(f"  outliers_dropped: {q['n_outliers_dropped']}/{q['measurement_iters'] + q['n_outliers_dropped']}")
+    results: dict[str, dict] = {}
+    print("\n[matrix] tier=A10G ...")
+    results["A10G"] = probe_calibration_a10g.remote()
+    if not skip_a100:
+        print("\n[matrix] tier=A100-80GB ...")
+        results["A100-80GB"] = probe_calibration_a100.remote()
+
+    print("\n" + "=" * 70)
+    print("=== MATRIX RESULT ===")
+    print("=" * 70)
+    for tier, r in results.items():
+        print(f"\n[{tier}]")
+        if r.get("status") == "fail":
+            print(f"  status: FAIL")
+            print(f"  reason: {r.get('reason', '(no reason)')}")
+            continue
+        fp = r["fingerprint"]
+        q = r["quality"]
+        cache = r.get("cache", {})
+        print(f"  gpu:            {fp['gpu_name']!r}")
+        print(f"  driver:         {fp['driver_version_major']}.{fp['driver_version_minor']}")
+        print(f"  cuda:           {fp['cuda_version_major']}.{fp['cuda_version_minor']}")
+        print(f"  ram:            {fp['ram_gb']}GB")
+        print(f"  median_ms:      {q['median_ms']:.4f}")
+        print(f"  p99_ms:         {q['p99_ms']:.4f}")
+        print(f"  quality_score:  {q['quality_score']:.4f}")
+        print(f"  cache_hit:      {cache.get('reload_hit', '?')}")
+        print(f"  stale_on_diff:  {cache.get('stale_on_fingerprint_change', '?')}")
+
+    # Cross-tier comparison: median_ms should differ across tiers
+    # (A100 faster than A10G), but both should hold the substrate
+    # invariants (positive, p99 >= median, quality in [0,1]).
+    if "A10G" in results and "A100-80GB" in results:
+        if (
+            results["A10G"].get("status") == "ok"
+            and results["A100-80GB"].get("status") == "ok"
+        ):
+            print("\n=== CROSS-TIER ===")
+            a10g_med = results["A10G"]["quality"]["median_ms"]
+            a100_med = results["A100-80GB"]["quality"]["median_ms"]
+            print(f"  A10G median:      {a10g_med:.4f} ms")
+            print(f"  A100 median:      {a100_med:.4f} ms")
+            print(f"  ratio (A10G/A100): {a10g_med / a100_med:.2f}x")
+            print(f"  (numpy stub is CPU-bound; ratio reflects host CPU diff)")
