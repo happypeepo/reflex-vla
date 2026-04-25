@@ -1080,6 +1080,14 @@ def create_app(
     auto_calibrate: bool = False,  # Phase 1 auto-calibration opt-in
     calibration_cache_path: str | None = None,  # path to ~/.reflex/calibration.json
     calibrate_force: bool = False,  # ignore cache hit, re-run measurement
+    # Policy-versioning Days 9-10 integration. Per ADR
+    # 2026-04-25-policy-versioning-architecture: when policy_b_export_dir is
+    # set, create_app loads BOTH ReflexServer instances + builds a
+    # TwoPolicyDispatcher; /act routes through the dispatcher instead of the
+    # single-server PolicyRuntime. Single-policy mode (default) unchanged.
+    policy_b_export_dir: str | None = None,  # 2-policy mode: path to slot B
+    policy_split_a_percent: int = 50,  # % traffic to slot A in [0, 100]
+    policy_crash_threshold: int = 5,  # per-slot circuit-breaker threshold
 ) -> Any:
     """Create a FastAPI app for serving VLA predictions.
 
@@ -1510,6 +1518,85 @@ def create_app(
                 "to JIT the engine. /health returns 200 immediately."
             )
 
+        # ---------------------------------------------------------------
+        # Policy-versioning Day 9-10 integration: 2-policy mode.
+        # When policy_b_export_dir is set, build TWO ReflexServers via
+        # setup_two_policy_serving + store the dispatcher on
+        # server.two_policy_state. /act handler dispatches through the
+        # dispatcher instead of the single-server PolicyRuntime.
+        # ---------------------------------------------------------------
+        server.two_policy_state = None  # type: ignore[attr-defined]
+        if policy_b_export_dir:
+            from reflex.runtime.two_policy_setup import setup_two_policy_serving
+
+            # The first server (the one we already created above) is server A.
+            # Build server B via setup_two_policy_serving's server_factory,
+            # which mirrors the same load() path. We pass server A in via a
+            # closure to avoid re-loading it.
+            servers_pair = {"a": server}
+
+            def _two_policy_server_factory(*, export_dir, **kwargs):
+                # First call (slot A): return the already-loaded server we have
+                # from the outer create_app code. Match by Path equivalence.
+                if "a" in servers_pair:
+                    try:
+                        if Path(export_dir).resolve() == servers_pair["a"].export_dir.resolve():
+                            return servers_pair["a"]
+                    except (OSError, RuntimeError):
+                        pass
+                # Otherwise build server B with the same shape as A.
+                from reflex.runtime.server import ReflexServer
+                srv_b = ReflexServer(
+                    export_dir=export_dir,
+                    device=device,
+                    providers=providers,
+                    strict_providers=strict_providers,
+                    safety_config=safety_config,
+                    adaptive_steps=adaptive_steps,
+                    cloud_fallback_url=cloud_fallback_url,
+                    deadline_ms=deadline_ms,
+                    max_batch=max_batch,
+                    batch_timeout_ms=batch_timeout_ms,
+                )
+                srv_b.load()
+                servers_pair["b"] = srv_b
+                return srv_b
+
+            try:
+                two_state = setup_two_policy_serving(
+                    export_a=server.export_dir,
+                    export_b=policy_b_export_dir,
+                    split_a_percent=policy_split_a_percent,
+                    no_rtc=True,  # ADR-enforced; CLI also blocks otherwise
+                    crash_threshold=policy_crash_threshold,
+                    server_factory=_two_policy_server_factory,
+                    runtime_factory=None,  # Phase 1: no per-policy PolicyRuntime
+                                           # (would require server.run_batch
+                                           #  callbacks per slot; deferred).
+                    # GPU-memory check uses the export-dir size estimator;
+                    # can be skipped via env for tests / CPU-only runs.
+                    skip_memory_check=bool(_os.environ.get(
+                        "REFLEX_SKIP_2POLICY_MEMORY_CHECK", ""
+                    )),
+                )
+                server.two_policy_state = two_state  # type: ignore[attr-defined]
+                logger.info(
+                    "two_policy.serving_active split_a_percent=%d "
+                    "crash_threshold=%d slot_a=%s slot_b=%s",
+                    policy_split_a_percent, policy_crash_threshold,
+                    two_state.policy_a.model_version,
+                    two_state.policy_b.model_version,
+                )
+            except Exception as exc:
+                logger.error(
+                    "two_policy.setup_failed -- falling back to single-policy "
+                    "serve (export_a stays loaded). Reason: %s", exc,
+                )
+                # Don't raise -- single-policy serve continues to work as
+                # documented. Operator sees the error in logs + the
+                # banner the CLI prints.
+                server.two_policy_state = None  # type: ignore[attr-defined]
+
         # PolicyRuntime — per-policy queue + cost-weighted scheduler (Phase 1
         # chunk-budget-batching). Single-policy default key "prod"; multi-policy
         # via policy-versioning lands {"a": ..., "b": ...} on the same dict.
@@ -1714,33 +1801,57 @@ def create_app(
                 span.set_attribute("reflex.rtc.episode_id", request.episode_id)
 
             try:
-                # Route through the per-policy runtime queue (chunk-budget-
-                # batching Phase 1). Single-policy default slot is "prod";
-                # policy-versioning later routes via PolicyRouter to "a"/"b".
-                from reflex.runtime.policy_runtime import QueueFull as _PRQueueFull
-                _runtime = getattr(server, "policies", {}).get("prod")
-                if _runtime is None:
-                    # Fallback for backends/tests that don't install a runtime —
-                    # call the per-request path directly.
-                    result = await server.predict_from_base64_async(
-                        image_b64=request.image,
-                        instruction=request.instruction,
-                        state=request.state,
+                # 2-policy mode: route via TwoPolicyDispatcher (overrides the
+                # single-policy PolicyRuntime path). Per ADR
+                # 2026-04-25-policy-versioning-architecture: episode-sticky
+                # SHA-256 hash on episode_id; first-request decides slot;
+                # subsequent requests in same episode get the same slot.
+                _two_state = getattr(server, "two_policy_state", None)
+                if _two_state is not None:
+                    # Resolve an episode_id (from request body OR fall back to
+                    # request.session_id if present; degraded routing fires a
+                    # one-time warning when both are missing).
+                    _ep_id = (
+                        getattr(request, "episode_id", None)
+                        or getattr(request, "session_id", None)
                     )
+                    _req_id = getattr(request, "request_id", None) or (
+                        f"req_{int(time.time() * 1000)}"
+                    )
+                    result, _routing = await _two_state.dispatcher.predict(
+                        request=request, episode_id=_ep_id, request_id=_req_id,
+                    )
+                    # Stash routing decision so the response builder + headers
+                    # + recorder can pick it up below.
+                    _two_routing_decision = _routing
                 else:
-                    try:
-                        result = await _runtime.submit(request)
-                    except _PRQueueFull:
-                        return JSONResponse(
-                            status_code=503,
-                            content={
-                                "error": "queue_full",
-                                "message": "policy runtime queue at capacity",
-                                "policy_id": "prod",
-                                "max_queue": _runtime.snapshot().get("max_queue"),
-                            },
-                            headers={"Retry-After": "1"},
+                    _two_routing_decision = None
+                    # Single-policy mode: route through the existing
+                    # per-policy runtime queue (chunk-budget-batching Phase 1).
+                    from reflex.runtime.policy_runtime import QueueFull as _PRQueueFull
+                    _runtime = getattr(server, "policies", {}).get("prod")
+                    if _runtime is None:
+                        # Fallback for backends/tests that don't install a runtime —
+                        # call the per-request path directly.
+                        result = await server.predict_from_base64_async(
+                            image_b64=request.image,
+                            instruction=request.instruction,
+                            state=request.state,
                         )
+                    else:
+                        try:
+                            result = await _runtime.submit(request)
+                        except _PRQueueFull:
+                            return JSONResponse(
+                                status_code=503,
+                                content={
+                                    "error": "queue_full",
+                                    "message": "policy runtime queue at capacity",
+                                    "policy_id": "prod",
+                                    "max_queue": _runtime.snapshot().get("max_queue"),
+                                },
+                                headers={"Retry-After": "1"},
+                            )
             except Exception as _predict_exc:  # noqa: BLE001
                 # Circuit-breaker increment on raw exception. Re-raise so
                 # FastAPI returns 500; subsequent calls hit the degraded

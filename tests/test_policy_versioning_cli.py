@@ -194,11 +194,12 @@ def test_shadow_policy_logs_phase15_warning(fake_export, tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_2policy_valid_combo_surfaces_deferral_banner(fake_export, fake_export_b, monkeypatch):
+def test_2policy_valid_combo_surfaces_active_banner(fake_export, fake_export_b, monkeypatch):
     """--policy-a + --policy-b + --no-rtc + --split=50 -> validation passes,
-    surfaces the 'Day 9-10' deferral banner, falls through to single-policy
-    serve below (which will also fail on the fake export, but we just
-    verify the banner)."""
+    surfaces the '2-policy mode active' banner, then proceeds to load.
+    Per ADR Day 9-10 integration: full 2-policy serving is now wired
+    via setup_two_policy_serving + create_app. ReflexServer.load is
+    stubbed to short-circuit before the actual model load."""
     def _fake_load(self):
         raise SystemExit(0)
 
@@ -214,5 +215,5 @@ def test_2policy_valid_combo_surfaces_deferral_banner(fake_export, fake_export_b
             "--no-rtc",
         ],
     )
-    assert "2-policy mode flags accepted" in result.stdout
-    assert "Day 9-10" in result.stdout
+    assert "2-policy mode active" in result.stdout
+    assert "--no-rtc enforced" in result.stdout

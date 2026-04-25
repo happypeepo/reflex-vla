@@ -1564,17 +1564,15 @@ def serve(
                     f"[red]{label} export not found: {path}[/red]"
                 )
                 raise typer.Exit(1)
-        # 2-policy load path lands in Day 9-10 integration; for now
-        # surface a clear "deferred" message rather than half-loading.
+        # 2-policy mode active. The actual 2-instance load + dispatcher
+        # wiring happens in create_app's lifespan (per ADR Days 9-10):
+        # setup_two_policy_serving builds server B alongside server A,
+        # composes a TwoPolicyDispatcher, stores state on server.two_policy_state.
+        # /act handler routes via dispatcher when state is set.
         console.print(
-            f"\n[yellow]2-policy mode flags accepted (--policy-a={policy_a}, "
-            f"--policy-b={policy_b}, --split={split}).[/yellow]"
-        )
-        console.print(
-            "[yellow]Full 2-policy serving lands in Day 9-10 integration "
-            "(see features/01_serve/subfeatures/_ecosystem/policy-versioning/"
-            "policy-versioning_plan.md). Single-policy mode continues "
-            "below.[/yellow]\n"
+            f"\n[bold]2-policy mode active[/bold] "
+            f"(--policy-a={policy_a}, --policy-b={policy_b}, "
+            f"--split={split}, --no-rtc enforced)."
         )
 
     if shadow_policy:
@@ -1852,6 +1850,11 @@ def serve(
         auto_calibrate=auto_calibrate,
         calibration_cache_path=str(_calib_cache_path) if _calib_cache_path else None,
         calibrate_force=calibrate_force,
+        # Policy-versioning Days 9-10: 2-policy mode wiring. Per ADR
+        # 2026-04-25-policy-versioning-architecture.
+        policy_b_export_dir=policy_b or None,
+        policy_split_a_percent=split,
+        policy_crash_threshold=max_consecutive_crashes,
     )
     if api_key:
         composed.append("[cyan]api-key-auth[/cyan]")
