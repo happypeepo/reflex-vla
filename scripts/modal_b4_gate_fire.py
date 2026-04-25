@@ -251,17 +251,27 @@ def fire_gate(
 
     def _flatten(records: list) -> tuple:
         base_rows, obs_rows, chunk_idx_rows, latency_rows = [], [], [], []
+        n_skipped_dim = 0
+        n_skipped_empty = 0
         for rec in records:
             actions = rec.get("actions") or rec.get("response", {}).get("actions")
             state = rec.get("state") or rec.get("request", {}).get("state")
             if not actions or not state:
+                n_skipped_empty += 1
                 continue
             base_lat = float(rec.get("latency_ms") or rec.get("latency_total_ms") or 0.0)
             inj = float(rec.get("injected_latency_ms") or 0.0)
             obs_lat = base_lat + inj
             for ci, action in enumerate(actions):
                 a = np.asarray(action, dtype=np.float32)
-                if a.shape[0] != action_dim:
+                # Pi05 exports return 32-dim padded actions; we only care
+                # about the first action_dim. TRUNCATE rather than reject
+                # (caught 2026-04-25 b4 gate v6: every record skipped because
+                # decomposed actions were 32-dim and gate default was 7).
+                if a.shape[0] >= action_dim:
+                    a = a[:action_dim]
+                else:
+                    n_skipped_dim += 1
                     continue
                 obs_pad = np.zeros(obs_dim, dtype=np.float32)
                 s = np.asarray(state[:obs_dim], dtype=np.float32)
@@ -270,6 +280,11 @@ def fire_gate(
                 obs_rows.append(obs_pad)
                 chunk_idx_rows.append(ci)
                 latency_rows.append(obs_lat)
+        if n_skipped_empty or n_skipped_dim:
+            print(
+                f"  flatten: skipped {n_skipped_empty} empty + "
+                f"{n_skipped_dim} dim-too-small records"
+            )
         if not base_rows:
             return None
         return (np.asarray(base_rows, dtype=np.float32),
