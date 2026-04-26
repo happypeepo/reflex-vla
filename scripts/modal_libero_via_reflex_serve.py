@@ -359,6 +359,15 @@ def libero_via_serve(
                             actions = resp.get("actions") or []
                             if not actions:
                                 raise RuntimeError("/act returned empty actions")
+                            # Diagnostic: log A2C2 decision once per ep at step 0
+                            # so we can see whether the hook actually applied or
+                            # auto-skipped (low_latency / high_success / cold_start).
+                            if t == 0 and "a2c2_applied" in resp:
+                                print(
+                                    f"  [a2c2 diag] step=0: applied={resp.get('a2c2_applied')} "
+                                    f"reason={resp.get('a2c2_reason')!r} "
+                                    f"magnitude={resp.get('a2c2_correction_magnitude')}"
+                                )
                             # Take the first action of the chunk (chunk-by-chunk replan).
                             # Pi05DecomposedServer returns action_dim per export config
                             # (32 for pi05 padded). LIBERO franka env expects 7-DOF.
