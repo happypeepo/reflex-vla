@@ -1423,6 +1423,7 @@ def create_app(
     # /act for per-chunk correction with auto-skip semantics. Per
     # a2c2-correction execution plan B.5 Day 3.
     server.a2c2_hook = None  # type: ignore[attr-defined]
+    server.a2c2_internal = False  # type: ignore[attr-defined]
     if a2c2_checkpoint:
         try:
             from reflex.runtime.a2c2_hook import A2C2Hook, A2C2HookConfig
@@ -1433,12 +1434,23 @@ def create_app(
             server.a2c2_hook = A2C2Hook.from_checkpoint(  # type: ignore[attr-defined]
                 a2c2_checkpoint, config=_a2c2_cfg,
             )
+            # If the server class can apply A2C2 internally (in normalized
+            # action space, between inference + denorm), bind the hook there.
+            # Pi05DecomposedServer does this; legacy ReflexServer does not.
+            # The /act handler skips its own A2C2 application when
+            # server.a2c2_internal is True (since the result dict already
+            # carries a2c2_* fields populated by the server itself).
+            if hasattr(server, "set_a2c2_hook"):
+                server.set_a2c2_hook(server.a2c2_hook)  # type: ignore[attr-defined]
+                server.a2c2_internal = True  # type: ignore[attr-defined]
             logger.info(
                 "A2C2 hook loaded: checkpoint=%s, "
-                "latency_threshold_ms=%.1f, success_threshold=%.2f",
+                "latency_threshold_ms=%.1f, success_threshold=%.2f, "
+                "applied=%s",
                 a2c2_checkpoint,
                 server.a2c2_hook.config.latency_threshold_ms,
                 server.a2c2_hook.config.success_threshold,
+                "internal-pre-denorm" if server.a2c2_internal else "post-/act",
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -1446,6 +1458,7 @@ def create_app(
                 a2c2_checkpoint, exc,
             )
             server.a2c2_hook = None  # type: ignore[attr-defined]
+            server.a2c2_internal = False  # type: ignore[attr-defined]
     # The cuda_graphs_enabled flag is consumed by Pi05DecomposedInference when
     # that backend is instantiated (scripts/modal_*_decomposed.py paths, and
     # future production wiring once chunk-budget-batching lands the decomposed-
@@ -2104,8 +2117,10 @@ def create_app(
             # the hook's rolling windows AFTER the apply call so the
             # current request's signal joins the steady-state distribution.
             _a2c2 = getattr(server, "a2c2_hook", None)
+            _a2c2_internal = getattr(server, "a2c2_internal", False)
             if (
                 _a2c2 is not None
+                and not _a2c2_internal  # server applied internally; skip post-hoc
                 and isinstance(result, dict)
                 and "error" not in result
                 and isinstance(result.get("actions"), list)

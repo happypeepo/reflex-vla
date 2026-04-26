@@ -100,6 +100,11 @@ class Pi05DecomposedServer:
         self._inference: Any = None  # Pi05DecomposedInference
         self._tokenizer: Any = None  # HF tokenizer
         self._action_guard: Any = None
+        # A2C2 hook applied INTERNALLY in _predict (between inference output
+        # and action denormalization), so the head sees the same normalized
+        # action distribution it was trained on. Set via set_a2c2_hook() from
+        # create_app at lifespan time. None = no A2C2 (default).
+        self._a2c2_hook: Any = None
         self._split_orchestrator = None
         self._last_good_actions: np.ndarray | None = None
         self._deadline_misses = 0
@@ -583,6 +588,16 @@ class Pi05DecomposedServer:
                 noise=noise, state=state_arr,
             )
 
+            # 5b. A2C2 hook -- applied in NORMALIZED action space (between
+            # inference output and denorm step), because the head was trained
+            # on stale-fresh gaps of normalized actions. Caught 2026-04-26:
+            # applying the hook AFTER denorm corrupted actions because the
+            # head's residuals are in normalized units (~[-1,1]) while
+            # denormalized actions have very different magnitudes (~[0.5m]).
+            a2c2_decision_meta: dict[str, Any] | None = None
+            if self._a2c2_hook is not None:
+                a2c2_decision_meta = self._apply_a2c2_normalized(actions_padded)
+
             # 6. Postprocess -- denormalize THEN slice to action_dim.
             # Denorm formula: action_real = action_norm * std + mean.
             # The normalizer applies to the FULL max_action_dim padded
@@ -612,16 +627,79 @@ class Pi05DecomposedServer:
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             self._latency_history.append(elapsed_ms)
 
-            return {
+            result_dict: dict[str, Any] = {
                 "actions": actions_out.tolist(),
                 "num_actions": int(actions_out.shape[0]),
                 "action_dim": self.action_dim,
                 "latency_ms": elapsed_ms,
                 "inference_mode": self._inference_mode,
             }
+            if a2c2_decision_meta is not None:
+                result_dict.update(a2c2_decision_meta)
+            return result_dict
         except Exception as exc:  # noqa: BLE001
             logger.exception("Pi05DecomposedServer.predict failed")
             return {"error": f"{type(exc).__name__}: {exc}"}
+
+    def set_a2c2_hook(self, hook: Any) -> None:
+        """Bind an A2C2Hook instance to be applied internally during _predict
+        (in normalized action space, before denorm). Called from create_app at
+        lifespan time after the hook is loaded.
+
+        Returns nothing. Setting None disables internal a2c2 application.
+        """
+        self._a2c2_hook = hook
+        if hook is not None:
+            logger.info(
+                "Pi05DecomposedServer A2C2 hook bound INTERNALLY (applied in "
+                "normalized action space before denorm). action_dim=%d, "
+                "obs_dim=%d", hook.head.config.action_dim, hook.head.config.obs_dim,
+            )
+
+    def _apply_a2c2_normalized(self, actions_padded: np.ndarray) -> dict[str, Any]:
+        """Apply A2C2 hook on the chunk in NORMALIZED space.
+
+        actions_padded shape on entry: (1, chunk_size, max_action_dim) OR
+        (chunk_size, max_action_dim). Mutates the array in-place to write the
+        corrected leading hook_dim slice back. Returns a dict of result
+        metadata (a2c2_applied / a2c2_reason / a2c2_correction_magnitude) for
+        merging into the /act response.
+
+        The hook returns corrections in the SAME normalized space the head
+        was trained on. Splice the corrected leading slice back into the
+        full padded chunk; downstream denorm + slice-to-action_dim run
+        unchanged.
+        """
+        try:
+            # Strip the batch dim if present so the hook sees (chunk_size, ad).
+            if actions_padded.ndim == 3:
+                chunk = actions_padded[0]
+                has_batch = True
+            else:
+                chunk = actions_padded
+                has_batch = False
+            hook_dim = self._a2c2_hook.head.config.action_dim
+            actions_for_hook = chunk[:, :hook_dim].copy()
+            corrected, decision, magnitude = (
+                self._a2c2_hook.maybe_apply_to_chunk(actions=actions_for_hook)
+            )
+            if decision.apply:
+                if has_batch:
+                    actions_padded[0, :, :hook_dim] = corrected
+                else:
+                    actions_padded[:, :hook_dim] = corrected
+            return {
+                "a2c2_applied": bool(decision.apply),
+                "a2c2_reason": str(decision.reason),
+                "a2c2_correction_magnitude": round(float(magnitude), 6),
+            }
+        except Exception as exc:  # noqa: BLE001 -- A2C2 must never break /act
+            logger.warning("Pi05DecomposedServer.a2c2_apply_failed: %s", exc)
+            return {
+                "a2c2_applied": False,
+                "a2c2_reason": f"error:{type(exc).__name__}",
+                "a2c2_correction_magnitude": 0.0,
+            }
 
     def _prep_image(
         self, image: np.ndarray | None,
