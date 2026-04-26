@@ -16,7 +16,24 @@ from typing import Any
 # Map tool name → callable that returns argv (list[str]) for `reflex <subcommand>`.
 # Each builder validates required args and ignores unknown keys.
 
-OutputCap = 8000  # truncate stdout so we don't blow context
+OutputCap = 8000  # truncate stdout/stderr so we don't blow LLM context
+
+
+def _smart_truncate(text: str, cap: int = OutputCap) -> str:
+    """Keep the head + tail when truncating long output.
+
+    Compile errors and stack traces put the actionable info at the END
+    (the actual exception line, the failing assertion). Head-only
+    truncation loses that. We keep 1/3 head + 2/3 tail with a marker.
+    """
+    if len(text) <= cap:
+        return text
+    head_len = cap // 3
+    tail_len = cap - head_len - 80  # leave room for the marker
+    head = text[:head_len]
+    tail = text[-tail_len:]
+    dropped = len(text) - head_len - tail_len
+    return f"{head}\n... [truncated {dropped} chars in the middle] ...\n{tail}"
 
 
 def _flag(args: list[str], key: str, value: Any) -> None:
@@ -143,12 +160,8 @@ def execute(name: str, params: dict[str, Any], reflex_bin: str | None = None, dr
     except FileNotFoundError as e:
         return {"command": cmd_str, "stdout": "", "stderr": str(e), "exit_code": 127}
 
-    stdout = proc.stdout or ""
-    stderr = proc.stderr or ""
-    if len(stdout) > OutputCap:
-        stdout = stdout[:OutputCap] + "\n... [truncated]"
-    if len(stderr) > OutputCap:
-        stderr = stderr[:OutputCap] + "\n... [truncated]"
+    stdout = _smart_truncate(proc.stdout or "")
+    stderr = _smart_truncate(proc.stderr or "")
 
     return {
         "command": cmd_str,

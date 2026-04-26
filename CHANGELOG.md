@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.4.0 — 2026-04-27
+
+Polish release — bundles five small wins + one new optional surface.
+
+### Added
+- **Textual TUI for `reflex chat`** (opt-in via `pip install 'reflex-vla[tui]'`, then `reflex chat --tui`). Multi-panel layout: scrollable transcript, dedicated tool-calls panel with live status, persistent input box, status bar with token/tool count. Mouse + scroll-back + keyboard shortcuts (Ctrl+L clear, Ctrl+R reset). Falls back to the Rich REPL automatically if textual isn't installed. New module: `src/reflex/chat/tui.py`.
+- **Examples directory** — `examples/01-chat-quickstart.md`, `02-deploy-smolvla-jetson.md`, `03-distill-pi05.md`, `04-record-and-replay.md`. Self-contained walkthroughs for each major workflow.
+- **Once-per-day upgrade nag** — `reflex --version` (or any subcommand) now prints a one-line nag to stderr if PyPI has a newer release. Cached 24h in `$REFLEX_HOME/.upgrade_check`. Disable via `REFLEX_NO_UPGRADE_CHECK=1`. Skipped on editable installs. New module: `src/reflex/upgrade_check.py`.
+- **PyPI install digest script** — `python scripts/install_digest.py` pulls download counts via pypistats and prints a Markdown summary suitable for sharing.
+
+### Changed
+- **Chat tool result truncation now keeps the tail** (`executor.py:_smart_truncate`). Long stack traces and compile errors put the actionable info at the end; the old head-only truncation lost that. New default: 1/3 head + 2/3 tail with a marker.
+
+### Notes
+- `[tui]` extra adds ~5 MB (textual). Base install footprint unchanged for users who don't want the TUI.
+
 ## v0.3.5 — 2026-04-27
 
 ### Added

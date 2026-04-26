@@ -46,7 +46,13 @@ def main(
         callback=_version_callback, is_eager=True,
     ),
 ):
-    pass
+    # Once-per-day PyPI check for a newer reflex-vla; silent if up-to-date.
+    # Honors REFLEX_NO_UPGRADE_CHECK=1; skipped on dev installs.
+    try:
+        from reflex.upgrade_check import maybe_nag
+        maybe_nag(__version__)
+    except Exception:  # noqa: BLE001
+        pass  # never block the CLI on a network/cache hiccup
 
 
 @app.command(hidden=True)
@@ -3282,10 +3288,20 @@ def chat(
         False, "--no-stream",
         help="Disable token streaming (default streams live). Use for scripts that pipe output.",
     ),
+    tui: bool = typer.Option(
+        False, "--tui",
+        help="Use the Textual full-screen TUI (multi-panel layout, scroll-back, mouse). "
+             "Requires `pip install 'reflex-vla[tui]'`. Falls back to the Rich REPL if "
+             "textual isn't installed.",
+    ),
 ) -> None:
     """Natural-language chat that can run reflex commands for you."""
-    from reflex.chat.console import run_repl
-    run_repl(proxy_url=proxy_url, dry_run=dry_run, no_stream=no_stream)
+    if tui:
+        from reflex.chat.tui import run_tui
+        run_tui(proxy_url=proxy_url, dry_run=dry_run)
+    else:
+        from reflex.chat.console import run_repl
+        run_repl(proxy_url=proxy_url, dry_run=dry_run, no_stream=no_stream)
 
 
 config_app = typer.Typer(name="config", help="Show + manage reflex configuration.", no_args_is_help=True)
