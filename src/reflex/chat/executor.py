@@ -81,7 +81,7 @@ def _build_finetune(p: dict[str, Any]) -> list[str]:
 
 
 def _build_traces(p: dict[str, Any]) -> list[str]:
-    args = ["traces", "query"]
+    args = ["inspect", "traces"]
     _flag(args, "since", p.get("since"))
     _flag(args, "task", p.get("task"))
     if p.get("status") and p["status"] != "any":
@@ -91,13 +91,13 @@ def _build_traces(p: dict[str, Any]) -> list[str]:
 
 
 def _build_replay(p: dict[str, Any]) -> list[str]:
-    return ["replay", str(p["episode_id"]), "--export-dir", str(p["export_dir"])]
+    return ["replay", str(p["trace_file"]), "--model", str(p["export_dir"])]
 
 
 # Builders that take no args — just static argv.
 _STATIC = {
     "list_models": ["models", "list"],
-    "list_targets": ["targets"],
+    "list_targets": ["inspect", "targets"],
     "doctor": ["doctor"],
     "show_status": ["status"],
     "show_config": ["config", "show"],

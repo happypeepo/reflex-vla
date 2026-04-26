@@ -111,10 +111,13 @@ def export(
             else:
                 from reflex.exporters.monolithic import export_monolithic
         except ImportError as exc:
-            console.print(f"[red]{exc}[/red]")
-            console.print("\n[cyan]Fix: pip install 'reflex-vla[monolithic]' "
-                          "(pins transformers==5.3.0; use a clean venv to avoid "
-                          "the base transformers<5.0 conflict)[/cyan]")
+            console.print(f"[red]{exc}[/red]", markup=False)
+            console.print(
+                "\nFix: pip install 'reflex-vla[monolithic]' "
+                "(pins transformers==5.3.0; use a clean venv to avoid "
+                "the base transformers<5.0 conflict)",
+                style="cyan", markup=False,
+            )
             raise typer.Exit(2)
 
         import time
@@ -125,7 +128,7 @@ def export(
             else:
                 result = export_monolithic(model, output, num_steps=num_steps, target=target)
         except ImportError as exc:
-            console.print(f"[red]Missing monolithic dep: {exc}[/red]")
+            console.print(f"Missing monolithic dep: {exc}", style="red", markup=False)
             raise typer.Exit(2)
         elapsed = time.perf_counter() - start
         console.print(f"\n[bold green]Monolithic export complete in {elapsed:.1f}s[/bold green]")
@@ -647,9 +650,10 @@ def benchmark_cmd(
             import vla_eval  # noqa: F401
         except ImportError:
             console.print(
-                f"[red]--benchmark {benchmark} requires the eval extra.[/red]\n"
-                f"  Install with: [cyan]pip install 'reflex-vla[eval]'[/cyan]\n"
+                f"--benchmark {benchmark} requires the eval extra.\n"
+                f"  Install with: pip install 'reflex-vla[eval]'\n"
                 f"  Or run without --benchmark for latency-only.",
+                style="red", markup=False,
             )
             raise typer.Exit(2)
         valid = ("simpler", "maniskill")
@@ -1769,7 +1773,7 @@ def serve(
         from reflex.runtime.server import create_app
         import uvicorn
     except ImportError:
-        console.print("[red]Install serve dependencies: pip install 'reflex-vla[serve]'[/red]")
+        console.print("Install serve dependencies: pip install 'reflex-vla[serve]'", style="red", markup=False)
         raise typer.Exit(1)
 
     if replan_hz > 0 and execute_hz <= 0:
@@ -1909,8 +1913,9 @@ def serve(
             from reflex.mcp import create_mcp_server
         except ImportError:
             console.print(
-                "[red]MCP dependency not installed. Run:[/red]\n"
-                "  [cyan]pip install reflex-vla[mcp][/cyan]"
+                "MCP dependency not installed. Run:\n"
+                "  pip install 'reflex-vla[mcp]'",
+                style="red", markup=False,
             )
             raise typer.Exit(1)
         # Pull the live ReflexServer out of the FastAPI app's state
@@ -2488,7 +2493,7 @@ def doctor(
         add(
             "fastapi + uvicorn",
             False,
-            "not installed — run `pip install reflex-vla[serve,gpu]` for the server",
+            r"not installed — run `pip install reflex-vla\[serve,gpu]` for the server",
         )
 
     # safetensors
@@ -3074,6 +3079,109 @@ inspect_app.command("targets")(targets)
 inspect_app.command("guard")(guard)
 inspect_app.command("doctor")(doctor)  # also expose under inspect for completeness; doctor stays top-level too
 
+
+@inspect_app.command("traces")
+def inspect_traces(
+    dir: Optional[str] = typer.Option(
+        None, "--dir",
+        help="Trace directory to scan. Defaults to ~/.cache/reflex/traces and /tmp/traces.",
+    ),
+    since: Optional[str] = typer.Option(
+        None, "--since",
+        help="Only show traces newer than this window: e.g. '7d', '24h', '1h'.",
+    ),
+    task: Optional[str] = typer.Option(
+        None, "--task",
+        help="Filter by task name substring (matched against first record's instruction).",
+    ),
+    status: Optional[str] = typer.Option(
+        None, "--status",
+        help="Filter by trace status. Currently 'any' (no filter); episode-success not yet recorded.",
+    ),
+    limit: int = typer.Option(50, "--limit", help="Max rows to show."),
+) -> None:
+    """List recorded /act traces (JSONL files written by `reflex serve --record <dir>`)."""
+    import gzip
+    import json
+    import time
+    from pathlib import Path as _Path
+
+    candidates: list[_Path] = []
+    if dir:
+        candidates.append(_Path(dir))
+    else:
+        candidates.append(_Path.home() / ".cache" / "reflex" / "traces")
+        candidates.append(_Path("/tmp/traces"))
+
+    files: list[_Path] = []
+    for d in candidates:
+        if d.exists() and d.is_dir():
+            files.extend(sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True))
+            files.extend(sorted(d.glob("*.jsonl.gz"), key=lambda p: p.stat().st_mtime, reverse=True))
+
+    if not files:
+        console.print(
+            "No trace files found. Enable recording with: reflex serve <export> --record /tmp/traces",
+            markup=False,
+        )
+        return
+
+    cutoff_ts: float = 0.0
+    if since:
+        unit = since[-1]
+        try:
+            n = int(since[:-1])
+            mult = {"h": 3600, "d": 86400, "m": 60}.get(unit, 0)
+            if mult:
+                cutoff_ts = time.time() - n * mult
+        except ValueError:
+            pass
+
+    rows: list[tuple[str, str, str, str, str]] = []
+    for f in files:
+        if cutoff_ts and f.stat().st_mtime < cutoff_ts:
+            continue
+        first_record_task = "?"
+        n_records = 0
+        try:
+            opener = gzip.open if f.suffix == ".gz" else open
+            with opener(f, "rt") as fh:  # type: ignore[arg-type]
+                for i, line in enumerate(fh):
+                    n_records += 1
+                    if i == 0 or first_record_task == "?":
+                        try:
+                            rec = json.loads(line)
+                            instr = rec.get("instruction") or rec.get("request", {}).get("instruction") or ""
+                            if instr and instr != "?":
+                                first_record_task = instr[:40]
+                        except json.JSONDecodeError:
+                            pass
+                    if i >= 200:
+                        break
+        except Exception:
+            continue
+        if task and task.lower() not in first_record_task.lower():
+            continue
+        mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(f.stat().st_mtime))
+        size_kb = f.stat().st_size // 1024
+        rows.append((mtime, f.name[:40], first_record_task, str(n_records), f"{size_kb} KB"))
+        if len(rows) >= limit:
+            break
+
+    if not rows:
+        console.print("No traces match the filter.", markup=False)
+        return
+
+    table = Table(title=f"Recorded traces ({len(rows)} of {len(files)} total)")
+    table.add_column("Modified")
+    table.add_column("File")
+    table.add_column("Task")
+    table.add_column("Records")
+    table.add_column("Size")
+    for r in rows:
+        table.add_row(*r)
+    console.print(table)
+
 app.add_typer(models_app, name="models")
 app.add_typer(train_app, name="train")
 app.add_typer(validate_app, name="validate")
@@ -3113,6 +3221,68 @@ def chat(
     """Natural-language chat that can run reflex commands for you."""
     from reflex.chat.console import run_repl
     run_repl(proxy_url=proxy_url, dry_run=dry_run)
+
+
+config_app = typer.Typer(name="config", help="Show + manage reflex configuration.", no_args_is_help=True)
+app.add_typer(config_app, name="config")
+
+
+@app.command()
+def status() -> None:
+    """List running reflex serve processes (PID, port, command)."""
+    import re
+    import subprocess as _sp
+    try:
+        out = _sp.run(["ps", "-eo", "pid,etime,command"], capture_output=True, text=True, timeout=5)
+    except Exception as e:
+        console.print(f"ps failed: {e}", style="red", markup=False)
+        raise typer.Exit(1)
+    rows: list[tuple[str, str, str, str]] = []
+    for line in out.stdout.splitlines():
+        # Match `reflex serve` or `python -m reflex serve` or `python -m reflex.cli serve`
+        if not re.search(r"(?:^|/)reflex\s+serve\b|reflex\.cli\s+serve\b|-m\s+reflex\s+serve\b", line):
+            continue
+        if "grep" in line.lower() or "/status" in line or "ros2-serve" in line:
+            continue
+        m = re.match(r"\s*(\d+)\s+([\d:\-]+)\s+(.*)", line)
+        if not m:
+            continue
+        pid, etime, cmd = m.group(1), m.group(2), m.group(3)
+        port = ""
+        pm = re.search(r"--port\s+(\d+)", cmd)
+        if pm:
+            port = pm.group(1)
+        rows.append((pid, etime, port or "?", cmd[:120]))
+    if not rows:
+        console.print("No reflex serve processes detected.", markup=False)
+        return
+    table = Table(title="Reflex serve — running")
+    table.add_column("PID")
+    table.add_column("Uptime")
+    table.add_column("Port")
+    table.add_column("Command")
+    for r in rows:
+        table.add_row(*r)
+    console.print(table)
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Show effective reflex configuration (paths, defaults, env vars)."""
+    import os as _os
+    from pathlib import Path as _Path
+    from reflex import __version__ as _v
+    home = _Path(_os.environ.get("REFLEX_HOME", _Path.home() / ".cache" / "reflex"))
+    table = Table(title=f"Reflex config (v{_v})")
+    table.add_column("Key")
+    table.add_column("Value")
+    table.add_row("reflex_home", str(home))
+    table.add_row("model_cache", str(home / "models"))
+    table.add_row("export_default", str(_Path.cwd() / "reflex_export"))
+    table.add_row("hf_cache", _os.environ.get("HF_HOME", str(_Path.home() / ".cache" / "huggingface")))
+    table.add_row("FASTCREST_PROXY_URL", _os.environ.get("FASTCREST_PROXY_URL", "(default: https://chat.fastcrest.com)"))
+    table.add_row("OPENAI_API_KEY", "set" if _os.environ.get("OPENAI_API_KEY") else "(unset — chat uses hosted proxy)")
+    console.print(table)
 
 
 if __name__ == "__main__":

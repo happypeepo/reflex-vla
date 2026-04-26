@@ -153,13 +153,13 @@ TOOLS: list[dict[str, Any]] = [
     ),
     _tool(
         "replay_trace",
-        "Replay a single trace through a model + show diff vs original predictions.",
+        "Replay a recorded JSONL trace file against a target model + show action diff.",
         {
             "properties": {
-                "episode_id": {"type": "string"},
-                "export_dir": {"type": "string"},
+                "trace_file": {"type": "string", "description": "Path to recorded .jsonl or .jsonl.gz trace from `reflex serve --record`"},
+                "export_dir": {"type": "string", "description": "Path to target export dir (passed as --model to reflex replay)"},
             },
-            "required": ["episode_id", "export_dir"],
+            "required": ["trace_file", "export_dir"],
         },
     ),
     _tool(
