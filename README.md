@@ -82,17 +82,24 @@ Hidden legacy commands (`export`, `bench`, `replay`, etc.) stay callable for one
 ### Docker — zero-install serve
 
 ```bash
-# Pull the published image (x86_64 CUDA runtime)
+# x86_64 CUDA runtime (cloud GPUs, dev workstations)
 docker pull ghcr.io/rylinjames/reflex-vla:latest
-
-# Mount your exports dir at /exports, expose port 8000
 docker run --gpus all \
   -v $(pwd)/p0:/exports \
   -p 8000:8000 \
   ghcr.io/rylinjames/reflex-vla:latest
+
+# Jetson Orin / Orin Nano / Thor (arm64 + nvidia container runtime)
+docker pull ghcr.io/rylinjames/reflex-vla:latest-arm64
+docker run --runtime=nvidia \
+  -v $(pwd)/p0:/exports \
+  -p 8000:8000 \
+  ghcr.io/rylinjames/reflex-vla:latest-arm64
 ```
 
-The container's default command is `reflex serve /exports --host 0.0.0.0 --port 8000`. Override with any `reflex` subcommand: `docker run ... ghcr.io/rylinjames/reflex-vla:latest export <hf_id>` etc. Jetson arm64 images land in v0.3 (contact us if you need one sooner).
+The container's default command is `reflex serve /exports --host 0.0.0.0 --port 8000`. Override with any `reflex` subcommand: `docker run ... ghcr.io/rylinjames/reflex-vla:latest export <hf_id>` etc.
+
+Jetson arm64 image: built via QEMU cross-compile on tag push (`v*`). Bring-your-own-CUDA — the image deliberately doesn't bundle CUDA/cuDNN/TensorRT (those live on the Jetson under `/usr/local/cuda` and are ABI-locked to the host's JetPack version; the nvidia container runtime exposes them into the container).
 
 ### ROS2 — `reflex ros2-serve`
 
