@@ -18,7 +18,7 @@ One CLI, seven verbs, plus a chat agent.
 **Recommended** — runs hardware + Python checks first, picks the right install extras for your machine:
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/rylinjames/reflex-vla/main/install.sh | sh
+curl -fsSL https://fastcrest.com/install | sh
 ```
 
 The bootstrap installer detects your platform (Mac / Jetson Orin / NVIDIA GPU / CPU) and chooses the right extras automatically. It also bails early with a useful message on unsupported hardware (e.g. original 4 GB Jetson Nano — Maxwell GPU + JetPack 4.6 / Python 3.6, too old for VLAs).
