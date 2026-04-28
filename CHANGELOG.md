@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.7.0 — 2026-04-29
+
+ORT-TensorRT execution provider first-class support. Most users now get the **5.55× speedup** measured on Modal A10G (108.11 ms → 19.49 ms on SmolVLA monolithic, 2026-04-29) automatically — without manual `LD_LIBRARY_PATH` setup.
+
+### Added
+- **`tensorrt>=10.0,<11`** is now in the default `[gpu]` extras. Provides `libnvinfer.so.10` so ORT-TRT EP loads at runtime instead of silently falling back to ORT-CUDA EP. Adds ~2 GB to install footprint — that's the cost of the 5.55× win. Linux only (the `; sys_platform == 'linux'` marker keeps Mac installs untouched).
+- **`[gpu-min]` extras** as escape hatch for users who don't want the `tensorrt` install — gets you ORT-CUDA EP only (~5× slower on transformer workloads). Use when bandwidth/storage matter more than perf.
+- **Auto-`LD_LIBRARY_PATH` patch in `reflex/__init__.py`.** Prepends pip-installed `tensorrt_libs/`, `nvidia/cudnn/lib/`, `nvidia/cublas/lib/` paths so ORT can find the shared objects without manual env config. Idempotent. Opt-out via `REFLEX_NO_LD_LIBRARY_PATH_PATCH=1`. No-op on macOS, Windows, or when paths don't exist.
+- **`reflex doctor` validates the full ORT-TRT EP load chain.** Four new checks:
+  1. `libnvinfer.so.10` loadable via `ctypes.CDLL`
+  2. `libcublas.so.12` loadable
+  3. `libcudnn.so.9` loadable
+  4. Empty `ort.InferenceSession` with `TensorrtExecutionProvider` succeeds AND active providers includes TRT EP (gold-standard end-to-end check)
+  Each failure has a `pip install` remediation hint inline.
+- **README "Performance" section** documents the measured 5.55× claim with the Modal hardware (A10G), the workload (SmolVLA monolithic), the method (5+20 forward passes), the date, and the reproducer command. Plus a "How to verify" section pointing at `reflex doctor`.
+- **14 new unit tests** (8 LD_LIBRARY_PATH patch + 6 doctor TRT EP) covering Linux/macOS/Windows + opt-out + idempotency + lib loadable / not / fallback / session-create-throws branches.
+
+### Changed
+- `[gpu]` extras now Linux-marked for `tensorrt`. Mac users on `[gpu]` get cuDNN + cuBLAS pulls but no `tensorrt` (which has no Mac wheel anyway).
+- `__version__` bumped to `0.7.0` in `src/reflex/__init__.py`.
+
+### Notes
+- **No Blackwell support changes.** v0.5.5 documents Blackwell as not yet supported (ORT bundled cuBLAS/cuDNN lacks sm_120 kernels). v0.7's TRT EP work doesn't change this — the upstream gap is at the kernel level, not the install level.
+- **The 5.55× was measured on SmolVLA monolithic + A10G only.** Other model architectures (pi0.5 decomposed, GR00T DiT) and other hardware tiers (Orin Nano, T4, L4, H100) may show different ratios. Broader matrix tracked for v0.7.x.
+- **The original v0.7 plan was different.** ADR `2026-04-28-tensorrt-llm-runtime-path.md` proposed adding a `--runtime tensorrt-llm` flag with a new RuntimeSession abstraction (~3-4 weeks). Three independent research subagents (Lenses 1+2+3 of `tensorrt-llm-runtime_research.md`) plus a Modal A10G spike invalidated that direction: TRT-LLM is LLM-shaped (not VLA-shaped), doesn't actually unblock Blackwell, and the perf win it was trying to deliver was already in v0.6.0 via ORT-TRT EP — users just weren't getting it because their installs were missing libs. The real v0.7 fix turned out to be 5 days of install/docs/doctor hardening, not 3-4 weeks of new architecture. Full reasoning in the ADRs at `reflex_context/01_decisions/2026-04-{28,29}-*.md`.
+
 ## v0.6.0 — 2026-04-29
 
 Hardware-aware decomposed export + C-level crash visibility. Two real-fix surfaces from the v0.5.x first-tester debug session.

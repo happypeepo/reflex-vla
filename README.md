@@ -54,6 +54,59 @@ rm -rf ~/.cache/reflex/exports/<model_id>     # forces a fresh export on next re
 v0.5.4+ does this automatically when it detects a version mismatch — the manual step is
 only needed for caches built by v0.5.3 or earlier.
 
+## Performance
+
+`reflex-vla[serve,gpu]` (v0.7+) uses ONNX Runtime's TensorRT execution provider out of the box. Measured on Modal A10G (Ampere, sm_8.6) on 2026-04-29 against SmolVLA monolithic (5 warmup + 20 measured forward passes, batch=1):
+
+| Provider | Mean latency | p95 |
+|---|---|---|
+| `CUDAExecutionProvider` (ORT-CUDA fallback) | 108.11 ms | 108.68 ms |
+| **`TensorrtExecutionProvider` (default in v0.7+)** | **19.49 ms** | 19.71 ms |
+
+**5.55× faster.** The win comes from TensorRT's FP16 kernels + engine fusion. Older releases silently fell back to ORT-CUDA on most installs because `libnvinfer.so.10` and CUDA libs weren't on `LD_LIBRARY_PATH` — v0.7's `[serve,gpu]` extras pull `tensorrt>=10` and `reflex` patches `LD_LIBRARY_PATH` automatically at import.
+
+### How to verify you're getting the win
+
+```bash
+reflex doctor
+```
+
+Look for a **green ✓** on these checks (all four must pass):
+- `TensorRT runtime (libnvinfer.so.10)` — loadable
+- `CUDA cuBLAS (libcublas.so.12)` — loadable
+- `CUDA cuDNN (libcudnn.so.9)` — loadable
+- `ORT-TRT EP active` — session created with TRT EP in active providers
+
+If any are red ✗, the remediation hint says exactly which `pip install` to run. The most common cause is that you used `[serve,gpu-min]` or an older release that didn't pull `tensorrt` automatically.
+
+### Reproduce the measurement
+
+```bash
+modal profile activate <your-profile>
+modal run scripts/modal_v07_runtime_spike.py
+```
+
+Full reproducer + 9-iteration debug log: [`reflex_context/03_experiments/2026-04-29-v07-runtime-spike.md`](reflex_context/03_experiments/2026-04-29-v07-runtime-spike.md).
+
+### Caveats
+
+- Measured only on A10G + SmolVLA monolithic so far. Other model architectures (pi0.5 decomposed, GR00T) and other hardware tiers (Orin Nano, T4, H100) may show different ratios — broader matrix planned for v0.7.x.
+- **Blackwell (RTX 50-series, B200, GB200) still not supported** in v0.7 — ORT's bundled cuBLAS/cuDNN don't ship sm_120 kernels yet. v0.5.5 documents this in detail; nothing changed here. Tracking ORT upstream for the fix.
+
+### Opt-out
+
+Adds ~2 GB to `[serve,gpu]` install (the `tensorrt` package + bundled libs). If you don't want it:
+
+```bash
+pip install 'reflex-vla[serve,gpu-min]'   # ORT-CUDA only, ~5x slower on transformers
+```
+
+Or disable the `LD_LIBRARY_PATH` patch (e.g. if it conflicts with another env-aware tool):
+
+```bash
+REFLEX_NO_LD_LIBRARY_PATH_PATCH=1 reflex go ...
+```
+
 ## Quickstart — chat to it
 
 ```bash
