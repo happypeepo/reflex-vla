@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.5.5 — 2026-04-28
+
+Blackwell GPU support — TensorRT EP auto-disabled to prevent segfault.
+
+### Fixed
+- **TensorRT EP no longer segfaults on Blackwell GPUs (RTX 50-series, B200, GB200).** Caught 2026-04-28 by first-tester Rob (RTX 5090, exit code 139 + `ip 0x0` per dmesg). Root cause: ONNX Runtime's bundled TensorRT runtime predates Blackwell (sm_100), so TRT can't register kernels for the unknown architecture and leaves a NULL function pointer that gets called during model load. Auto-detects Blackwell via `nvidia-smi` and excludes `TensorrtExecutionProvider` from the providers list before session creation.
+- Falls back to `CUDAExecutionProvider` on Blackwell — same numerics (cos=+1.0 vs PyTorch), ~3-5× slower per inference. Suitable for chat / dev / prototyping / low-Hz robot control. Marginal for real-time control above 20 Hz.
+- **Loud, multi-line warning at every server startup on Blackwell** explaining the perf trade-off, the upstream tracking issue, and what workloads are/aren't impacted. Per CLAUDE.md "no silent fallbacks that paper over errors" — this is documented degradation, not silent. The warning auto-clears when ORT ships a Blackwell-aware TensorRT bundle.
+
+### Notes
+- Detection patterns: `rtx 50`, `rtx pro 60`, `blackwell`, `b200`, `gb200`. Add new patterns to `_BLACKWELL_GPU_PATTERNS` in `runtime/server.py` if NVIDIA ships another Blackwell SKU under a different name.
+- No code changes affect non-Blackwell GPUs — TRT EP path is identical to v0.5.4 there.
+- Subprocess wrapper for catching C-level crashes generically (so the next "TRT segfaults on a future architecture we don't know about" is also visible) is deferred to v0.6.0 — needs careful lifespan handling design + test matrix.
+
 ## v0.5.4 — 2026-04-28
 
 Real fixes for the four UX issues surfaced by the first-tester debugging session.

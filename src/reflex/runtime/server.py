@@ -72,6 +72,79 @@ except ImportError:
     _REFLEX_VERSION = ""
 
 
+# ─── Blackwell auto-detect ──────────────────────────────────────────────────
+# ORT-bundled TensorRT predates Blackwell (RTX 50-series, sm_100). On those
+# GPUs, TRT EP segfaults at session-init because TRT can't register kernels
+# for the unknown architecture and leaves a NULL function pointer that gets
+# called during model load. Detected 2026-04-28 by Rob (RTX 5090, exit 139,
+# `ip 0x0` per dmesg). We auto-disable TRT EP on Blackwell hardware until
+# ORT bundles a Blackwell-aware TensorRT runtime.
+
+_BLACKWELL_GPU_PATTERNS = (
+    "rtx 50",          # GeForce RTX 5070/5080/5090
+    "rtx pro 60",      # RTX PRO 6000 Blackwell
+    "blackwell",
+    "b200",            # B200 datacenter
+    "gb200",           # GB200 datacenter
+)
+
+
+def _gpu_is_blackwell() -> bool:
+    """True if any locally-visible NVIDIA GPU is Blackwell-family.
+
+    Returns False on errors (no nvidia-smi, no GPU, timeout) — best-effort.
+    A False result means "we don't have evidence of Blackwell"; the caller
+    proceeds with the normal TRT EP path.
+    """
+    import subprocess as _sub
+    try:
+        proc = _sub.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=3.0,
+        )
+    except (FileNotFoundError, _sub.TimeoutExpired, OSError):
+        return False
+    if proc.returncode != 0:
+        return False
+    names_lower = (proc.stdout or "").lower()
+    return any(pat in names_lower for pat in _BLACKWELL_GPU_PATTERNS)
+
+
+def _print_blackwell_trt_warning() -> None:
+    """Loud, multi-line warning so users understand the perf trade-off.
+
+    Per CLAUDE.md "no silent fallbacks that paper over errors" — this is
+    documented degradation, not silent. Users see exactly what's happening,
+    why, and the upgrade path.
+    """
+    bar = "═" * 72
+    msg = f"""
+{bar}
+⚠ Blackwell GPU detected (RTX 50-series / B200 / GB200, sm_100)
+{bar}
+TensorRT EP segfaults on Blackwell because ORT's bundled TensorRT runtime
+predates Blackwell support (sm_100 kernels not registered → NULL function
+pointer → SIGSEGV on session init). Auto-falling back to ORT's CUDA EP.
+
+What this means for you:
+  • Inference WORKS correctly (same numerics as TRT, cos=+1.0 vs PyTorch)
+  • Inference is ~3-5x SLOWER than supported tiers (CUDA EP vs TRT EP)
+  • Suitable for: chat, dev, prototyping, low-Hz robot control
+  • Marginal for: real-time control above 20 Hz
+
+Tracking the upstream fix:
+  https://github.com/microsoft/onnxruntime/issues — search "Blackwell sm_100"
+
+When ORT bundles a Blackwell-aware TensorRT runtime (target H1 2026), this
+warning will go away automatically and TRT EP will re-enable.
+{bar}
+"""
+    logger.warning(msg)
+
+
+# ─── End Blackwell auto-detect ──────────────────────────────────────────────
+
+
 class ReflexServer:
     """VLA inference server that loads exported models and serves predictions."""
 
@@ -409,10 +482,21 @@ class ReflexServer:
             # When max_batch > 1, fall through to CUDAExecutionProvider which
             # handles dynamic shapes natively and gives the 2.88x batching
             # speedup measured in Phase III.
+            #
+            # ALSO: ORT's bundled TensorRT runtime predates Blackwell (RTX
+            # 50-series, sm_100). On Blackwell GPUs, TRT EP segfaults at
+            # session-init with a NULL function pointer — caught 2026-04-28
+            # by first-tester Rob (RTX 5090, exit code 139). Auto-disable
+            # TRT EP on Blackwell + print a loud warning so users know
+            # they're on the slower CUDA-EP path until ORT bundles new TRT.
+            blackwell_detected = _gpu_is_blackwell()
             use_trt_ep = (
                 "TensorrtExecutionProvider" in available
                 and self._max_batch <= 1
+                and not blackwell_detected
             )
+            if blackwell_detected and "TensorrtExecutionProvider" in available:
+                _print_blackwell_trt_warning()
             if use_trt_ep:
                 # Use a per-export-dir engine cache so subsequent serve calls
                 # skip the engine-build cost.
