@@ -300,13 +300,11 @@ class A2C2Hook:
         magnitude = float(np.sqrt(total_sq))
 
         # Safety net per 2026-04-29-a2c2-correction_research_revisit:
-        # the bounded-output head should keep magnitude under
-        # CHUNK_MAGNITUDE_SAFETY_LIMIT (sqrt(chunk_size) * 3.0 — the
-        # theoretical max from per-step ±3.0 saturation). If a future
-        # head somehow exceeds that ceiling (e.g., bypasses tanh during
-        # training, or floating-point edge cases), refuse the correction
-        # rather than risking the magnitude-7 catastrophe re-occurring.
-        chunk_safety_limit = (chunk_size ** 0.5) * 3.0
+        # bounded-output head should keep magnitude under sqrt(chunk_size)
+        # * scale (theoretical max from per-step ±scale saturation). Scale
+        # is per-head (Phase 3); default 3.0 matches Phase 1 ship.
+        head_scale = self._head.config.output_saturation_scale
+        chunk_safety_limit = (chunk_size ** 0.5) * head_scale
         if magnitude > chunk_safety_limit:
             logger.warning(
                 "a2c2.magnitude_safety_skip: chunk_magnitude=%.2f exceeds "

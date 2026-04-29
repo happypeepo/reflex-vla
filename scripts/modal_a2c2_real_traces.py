@@ -151,6 +151,9 @@ def collect_and_train(
     collect_inject_latency_ms: float = 0.0,  # pass --inject-latency-ms to reflex serve at collect time
     l2_penalty_override: float = -1.0,  # if > 0, override L2_MAGNITUDE_PENALTY constant
     use_actual_latency: bool = False,  # use record's measured latency_ms instead of synthesized i*median_step_ms
+    # Phase 3: per-head saturation scale (default 3.0 = Phase 1 behavior;
+    # 1.5 allows L2 penalty to actually steer training without saturation cliff)
+    output_saturation_scale: float = 3.0,
 ) -> dict:
     """Run collection + training in one Modal call. Returns paths + summary."""
     import base64
@@ -444,9 +447,11 @@ def collect_and_train(
         hidden_dim=128,
         num_hidden_layers=3,
         position_encoding_dim=32,
+        output_saturation_scale=output_saturation_scale,
     )
     print(f"[real_traces] A2C2Config: input={cfg.input_dim} hidden={cfg.hidden_dim} × {cfg.num_hidden_layers} "
-          f"output={cfg.action_dim} (~{cfg.estimated_size_bytes()/1024:.1f} KB FP32)")
+          f"output={cfg.action_dim} sat_scale={cfg.output_saturation_scale} "
+          f"(~{cfg.estimated_size_bytes()/1024:.1f} KB FP32)")
 
     print(f"[real_traces] training {train_epochs} epochs on {n_pairs} pairs (batch={train_batch_size}, lr={train_lr})")
     result = train_a2c2_head(
@@ -516,6 +521,8 @@ def main(
     collect_inject_latency_ms: float = 0.0,
     l2_penalty_override: float = -1.0,
     use_actual_latency: bool = False,
+    # Phase 3:
+    output_saturation_scale: float = 3.0,
 ):
     """Collect real LIBERO traces + train A2C2 head on (stale, fresh) gap.
 
@@ -546,6 +553,7 @@ def main(
         collect_inject_latency_ms=collect_inject_latency_ms,
         l2_penalty_override=l2_penalty_override,
         use_actual_latency=use_actual_latency,
+        output_saturation_scale=output_saturation_scale,
     )
     print("\n=== RESULT ===")
     if r.get("status") == "fail":

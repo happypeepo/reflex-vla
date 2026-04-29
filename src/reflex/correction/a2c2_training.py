@@ -138,11 +138,13 @@ def _forward_batch(
         pre_activations.append(z)
         h = _gelu(z)
         activations.append(h)
-    # Output layer + bounded saturation. The pre-saturation z_out is not
-    # stored separately; the backward pass recovers d/dz from the post-tanh
-    # correction directly via 1 - (correction/scale)^2.
+    # Output layer + bounded saturation. Per-head scale (Phase 3) read from
+    # config; default 3.0 matches Phase 1. The pre-saturation z_out is not
+    # stored separately; the backward pass recovers d/dz via
+    # 1 - (correction/scale)^2.
     z_out = h @ head._weights[-1].T + head._biases[-1]
-    correction = np.tanh(z_out / OUTPUT_SATURATION_SCALE) * OUTPUT_SATURATION_SCALE
+    scale = cfg.output_saturation_scale
+    correction = np.tanh(z_out / scale) * scale
     return correction, activations, pre_activations
 
 
@@ -190,8 +192,10 @@ def _backward_batch(
     grad_corr = (grad_huber + grad_mag) / n  # (N, action_dim)
 
     # Backprop through tanh saturation: d(scale * tanh(z/scale))/dz =
-    # 1 - tanh²(z/scale) = 1 - (correction/scale)².
-    saturation_factor = 1.0 - (correction / OUTPUT_SATURATION_SCALE) ** 2
+    # 1 - tanh²(z/scale) = 1 - (correction/scale)². Scale read from config
+    # (Phase 3); default 3.0 matches Phase 1.
+    scale = head.config.output_saturation_scale
+    saturation_factor = 1.0 - (correction / scale) ** 2
     grad_out = grad_corr * saturation_factor  # (N, action_dim) — wrt z_out
 
     # Output layer (now uses post-tanh-backprop grad_out).

@@ -68,6 +68,13 @@ class A2C2Config:
     hidden_dim: int = _DEFAULT_HIDDEN_DIM
     num_hidden_layers: int = _DEFAULT_NUM_HIDDEN_LAYERS
     position_encoding_dim: int = _POSITION_ENCODING_DIM
+    # Phase 3 (2026-04-29): per-head saturation scale. Default 3.0 matches
+    # the Phase 1 deploy (kernels/a2c2_correction.py shipped 2026-04-29 in
+    # v0.7.2). Phase 2/2.1 found that L2 penalty alone hits a bimodal cliff
+    # because tanh saturation at scale=3.0 is the binding constraint. Heads
+    # trained with scale=1.5 (or other) bound output to ±scale and allow
+    # the L2 penalty to actually steer corrections in [0, scale] range.
+    output_saturation_scale: float = 3.0
 
     @property
     def input_dim(self) -> int:
@@ -235,15 +242,11 @@ class A2C2Head:
             x = self._weights[i] @ x + self._biases[i]
             x = _gelu(x)
 
-        # Output layer with bounded saturation. Per
-        # 2026-04-29-a2c2-correction_research_revisit (Lens 2 root cause):
-        # an unbounded output + MSE loss let the head emit magnitude-7
-        # corrections that systematically derail the policy. Saturating
-        # to ±3.0 in normalized action space (matching typical action
-        # range ~3σ) prevents the catastrophic failure mode while
-        # preserving the zero-init cold-start invariant (tanh(0)=0).
+        # Output layer with bounded saturation. Per-head scale (Phase 3,
+        # 2026-04-29) read from config; default 3.0 preserves Phase 1 ship.
         z_out = self._weights[-1] @ x + self._biases[-1]
-        correction = np.tanh(z_out / OUTPUT_SATURATION_SCALE) * OUTPUT_SATURATION_SCALE
+        scale = self._config.output_saturation_scale
+        correction = np.tanh(z_out / scale) * scale
         return correction
 
     def to_checkpoint_dict(self) -> dict[str, np.ndarray]:
@@ -255,6 +258,7 @@ class A2C2Head:
             "hidden_dim": np.int32(self._config.hidden_dim),
             "num_hidden_layers": np.int32(self._config.num_hidden_layers),
             "position_encoding_dim": np.int32(self._config.position_encoding_dim),
+            "output_saturation_scale": np.float32(self._config.output_saturation_scale),
         }
         for i, (w, b) in enumerate(zip(self._weights, self._biases)):
             out[f"w{i}"] = w
@@ -268,7 +272,9 @@ class A2C2Head:
 
     @classmethod
     def from_checkpoint(cls, path: str | Path) -> "A2C2Head":
-        """Load + verify schema."""
+        """Load + verify schema. Backward-compat: pre-Phase-3 checkpoints
+        (no output_saturation_scale field) load with the default 3.0,
+        matching their training-time behavior."""
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"A2C2 checkpoint not found: {path}")
@@ -280,6 +286,11 @@ class A2C2Head:
             hidden_dim=int(data["hidden_dim"]),
             num_hidden_layers=int(data["num_hidden_layers"]),
             position_encoding_dim=int(data["position_encoding_dim"]),
+            output_saturation_scale=(
+                float(data["output_saturation_scale"])
+                if "output_saturation_scale" in data.files
+                else 3.0
+            ),
         )
         n_layers = config.num_hidden_layers + 1
         weights = [data[f"w{i}"] for i in range(n_layers)]
