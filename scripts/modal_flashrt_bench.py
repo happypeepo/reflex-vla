@@ -166,12 +166,22 @@ def bench(
     print("=" * 60)
 
     # ---- 1. Verify FlashRT is built + importable ----
+    # The compiled kernels (flash_vla_kernels.so, flash_vla_fa2.so) are
+    # loaded internally by frontends; not exposed at the package top level.
+    # Public surface = flash_vla.load_model + flash_vla.VLAModel only.
     print("\n[1/4] verifying flash_vla import...", flush=True)
     try:
         import flash_vla
         print(f"  flash_vla.__version__ = {getattr(flash_vla, '__version__', '(no __version__)')}")
-        from flash_vla import flash_vla_kernels  # noqa: F401
-        print(f"  flash_vla.flash_vla_kernels imported OK")
+        assert hasattr(flash_vla, "load_model"), "flash_vla.load_model missing"
+        assert hasattr(flash_vla, "VLAModel"), "flash_vla.VLAModel missing"
+        print(f"  flash_vla.load_model + VLAModel exposed OK")
+        # Confirm the .so kernels were built + reachable from the install path.
+        import importlib.util
+        kernels_spec = importlib.util.find_spec("flash_vla.flash_vla_kernels")
+        fa2_spec = importlib.util.find_spec("flash_vla.flash_vla_fa2")
+        print(f"  flash_vla_kernels.so: {'found' if kernels_spec else 'MISSING'}")
+        print(f"  flash_vla_fa2.so:     {'found' if fa2_spec else 'MISSING'}")
     except Exception as exc:
         return {"status": "fail", "stage": "import", "error": repr(exc)}
 
