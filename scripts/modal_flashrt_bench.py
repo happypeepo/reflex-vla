@@ -35,7 +35,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 2) install.md compilation notes for FA2_ARCH_NATIVE_ONLY=ON
 # Plus Thor→N1.7 model update.
 # Bump again only when you need a fresh FlashRT git clone.
-_BUILD_BUST = "20260430-liang-hf-fix"
+_BUILD_BUST = "20260430-ninja-install"
 
 
 def _hf_secret():
@@ -127,6 +127,13 @@ image = (
         # FlashRT/CMakeLists.txt:93.
         "  -DFA2_ARCH_NATIVE_ONLY=ON && "
         "ninja -j$(nproc) && "
+        # CRITICAL: ninja install copies the built .so files
+        # (flash_vla_kernels.so, flash_vla_fa2.so) FROM build/ INTO
+        # flash_vla/ where pyproject.toml's package_data scoops them up.
+        # Without this, Python imports of flash_vla.flash_vla_fa2 fail
+        # at runtime even though the build linked successfully. Documented
+        # in upstream setup.py.
+        "ninja install && "
         f"cd {FLASHRT_DIR} && pip install -e '.[torch]'",
         gpu="L40S",  # cmake reads $CUDA_ARCH_LIST + needs nvcc; build on GPU
     )
