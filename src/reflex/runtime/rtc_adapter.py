@@ -60,6 +60,31 @@ def require_rtc() -> None:
         )
 
 
+def assert_rtc_compatible_with_num_steps(num_steps: int | None) -> None:
+    """Reject 1-NFE + RTC at config-time per CLAUDE.md no-silent-fallbacks.
+
+    RTC's prefix_weight schedule (lerobot RTCProcessor.denoise_step) computes
+    guidance weights via ``tau = 1 - time`` and ``c = (1 - tau) / tau``. When
+    ``num_steps == 1`` the only step runs at ``time == 1.0``, giving
+    ``tau == 0`` and a division-by-zero in ``c``. This is a math-level
+    singularity, not graceful degradation — fail loud at config-time
+    rather than crash mid-inference.
+
+    Surfaced in the per-step expert ONNX export research sidecar:
+    ``reflex_context/features/03_export/per-step-expert-export_research.md``
+    Lens 2 FM-4/FM-6.
+    """
+    if num_steps == 1:
+        raise ValueError(
+            "RTC guidance is not supported with num_steps=1. "
+            "RTC's guidance-weight formula divides by tau=1-time, which "
+            "is zero at the only step (time=1.0). Use num_steps >= 2 or "
+            "disable RTC for 1-step inference. See "
+            "features/03_export/per-step-expert-export_research.md "
+            "Lens 2 FM-4 for the math."
+        )
+
+
 # ──────────────────────────────────────────────────────────────────
 # Config
 # ──────────────────────────────────────────────────────────────────

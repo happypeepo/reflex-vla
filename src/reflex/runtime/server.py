@@ -1367,6 +1367,15 @@ def create_app(
     # is None or rtc_config.enabled is False, this is a no-op.
     server.rtc_adapter = None  # type: ignore[attr-defined]
     if rtc_config is not None and getattr(rtc_config, "enabled", False):
+        # Reject 1-NFE + RTC at config-time per the per-step-expert-export
+        # research sidecar (Lens 2 FM-4/FM-6). RTC's guidance-weight formula
+        # has tau=1-time=0 → division by zero at the only step when num_steps=1.
+        from .rtc_adapter import assert_rtc_compatible_with_num_steps
+        _num_steps = (
+            _monolithic_cfg.get("num_denoising_steps")
+            or _monolithic_cfg.get("decomposed", {}).get("num_steps")
+        )
+        assert_rtc_compatible_with_num_steps(_num_steps)
         try:
             from .rtc_adapter import RtcAdapter
             # action_buffer comes from server.configure_replan() in lifespan
