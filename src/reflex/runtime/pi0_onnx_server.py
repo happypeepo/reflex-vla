@@ -14,7 +14,7 @@ Changing num_steps requires re-export. Multi-step parity (num_steps=10)
 is tracked as a follow-up goal — the onnx-diagnostic + torch.export
 path hits a 835→886 shape tracer bug at num_steps>1 which is unsolved
 as of 2026-04. See
-https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/01_architecture/pi0_monolithic_wrap_pattern.md
+https://github.com/FastCrest/reflex-vault/blob/main/reflex_vla/01_architecture/pi0_monolithic_wrap_pattern.md
 """
 from __future__ import annotations
 

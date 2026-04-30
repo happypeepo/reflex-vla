@@ -17,7 +17,7 @@ from __future__ import annotations
 from . import Check, CheckResult, register
 
 CHECK_ID = "check_vla_eval_importable"
-DOCS_URL = "https://github.com/rylinjames/reflex-vla/blob/main/src/reflex/runtime/adapters/vla_eval.py"
+DOCS_URL = "https://github.com/FastCrest/reflex-vla/blob/main/src/reflex/runtime/adapters/vla_eval.py"
 
 
 def _run(model_path: str, **kwargs) -> CheckResult:

@@ -231,7 +231,7 @@ goals:
 
   - id: docker-image-smoke-test
     status: done
-    description: "Published `ghcr.io/rylinjames/reflex-vla:<version>` image runs end-to-end: `docker run --gpus all -v <export>:/exports -p 8000:8000 <image>` followed by `curl POST /act` returns a valid action chunk. Catches Dockerfile breakage, missing deps, entrypoint bugs — every release, before customers hit it."
+    description: "Published `ghcr.io/fastcrest/reflex-vla:<version>` image runs end-to-end: `docker run --gpus all -v <export>:/exports -p 8000:8000 <image>` followed by `curl POST /act` returns a valid action chunk. Catches Dockerfile breakage, missing deps, entrypoint bugs — every release, before customers hit it."
     check: "test -f tests/test_docker_image_smoke.py && .venv/bin/python -m pytest tests/test_docker_image_smoke.py -q 2>/dev/null"
     weight: 7
 
@@ -304,7 +304,7 @@ goals:
 
   - id: docker-arm64-jetson
     status: done
-    description: "Native arm64 Docker image (`ghcr.io/rylinjames/reflex-vla:<version>-arm64` or multi-arch manifest) that runs on Jetson hardware. Current published image is x86_64 only; Jetson users must build from source. The 'zero-install Docker run' quickstart in our README works on x86 GPUs (A10G, RTX) but is a dead-end for the primary customer target. Requires: QEMU emulation or native arm64 build in GitHub Actions + Jetson-specific CUDA/cuDNN pinning + smoke test on real Jetson hardware."
+    description: "Native arm64 Docker image (`ghcr.io/fastcrest/reflex-vla:<version>-arm64` or multi-arch manifest) that runs on Jetson hardware. Current published image is x86_64 only; Jetson users must build from source. The 'zero-install Docker run' quickstart in our README works on x86 GPUs (A10G, RTX) but is a dead-end for the primary customer target. Requires: QEMU emulation or native arm64 build in GitHub Actions + Jetson-specific CUDA/cuDNN pinning + smoke test on real Jetson hardware."
     check: "test -f .github/workflows/docker-publish-arm64.yml && grep -q 'arm64\\|linux/arm64' .github/workflows/docker-publish-arm64.yml 2>/dev/null"
     weight: 7
 
@@ -714,7 +714,7 @@ goals:
     weight: 8
 
   - id: adoption-github-stars-500
-    description: "GitHub stars on rylinjames/reflex-vla trending toward 500 (Phase 1 KPI at 6mo per north_star.md). Adoption proxy. Lightweight GitHub API check; could be automated weekly."
+    description: "GitHub stars on FastCrest/reflex-vla trending toward 500 (Phase 1 KPI at 6mo per north_star.md). Adoption proxy. Lightweight GitHub API check; could be automated weekly."
     check: "true  # external metric; no local check"
     weight: 6
 

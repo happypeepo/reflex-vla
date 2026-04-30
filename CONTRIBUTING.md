@@ -6,7 +6,7 @@ thanks for looking at reflex. this is a deploy layer for VLAs (SmolVLA, pi0, pi0
 
 ```bash
 # install from source
-git clone https://github.com/rylinjames/reflex-vla && cd reflex-vla
+git clone https://github.com/FastCrest/reflex-vla && cd reflex-vla
 uv pip install -e .
 
 # sanity check your box

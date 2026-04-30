@@ -1,7 +1,7 @@
 """VLA distillation — SnapFlow 1-step self-distillation for flow-matching VLAs.
 
 v0.3: SnapFlow only (pi0 + pi0.5). See
-https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/01_architecture/distill_SYNTHESIS.md
+https://github.com/FastCrest/reflex-vault/blob/main/reflex_vla/01_architecture/distill_SYNTHESIS.md
 for the scope decision.
 
 ## What's in v0.3

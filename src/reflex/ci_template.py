@@ -42,7 +42,7 @@ jobs:
 
       - name: Install reflex-vla
         run: |
-          pip install 'reflex-vla[serve,onnx,dev] @ git+https://github.com/rylinjames/reflex-vla@v{reflex_version}'
+          pip install 'reflex-vla[serve,onnx,dev] @ git+https://github.com/FastCrest/reflex-vla@v{reflex_version}'
 
       - name: Export SmolVLA
         run: |
@@ -72,7 +72,7 @@ jobs:
   #       with:
   #         python-version: "3.11"
   #     - name: Install reflex-vla
-  #       run: pip install 'reflex-vla[serve,onnx,dev] @ git+https://github.com/rylinjames/reflex-vla@v{reflex_version}'
+  #       run: pip install 'reflex-vla[serve,onnx,dev] @ git+https://github.com/FastCrest/reflex-vla@v{reflex_version}'
   #     - name: Export pi0
   #       run: reflex export lerobot/pi0_base --target desktop --output ./pi0_export
   #     - name: Validate round-trip parity
@@ -97,7 +97,7 @@ jobs:
   #       with:
   #         python-version: "3.11"
   #     - name: Install reflex-vla
-  #       run: pip install 'reflex-vla[serve,onnx,dev] @ git+https://github.com/rylinjames/reflex-vla@v{reflex_version}'
+  #       run: pip install 'reflex-vla[serve,onnx,dev] @ git+https://github.com/FastCrest/reflex-vla@v{reflex_version}'
   #     - name: Export GR00T
   #       run: reflex export nvidia/GR00T-N1-2B --target desktop --output ./gr00t_export
   #     - name: Validate round-trip parity

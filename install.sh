@@ -7,7 +7,7 @@
 #   curl -sSf https://fastcrest.com/install | sh
 #   curl -sSf https://fastcrest.com/install | sh -s -- --extras serve,gpu
 #
-# Source: https://github.com/rylinjames/reflex-vla
+# Source: https://github.com/FastCrest/reflex-vla
 set -eu
 
 # -- ANSI colors --------------------------------------------------------------
@@ -178,4 +178,4 @@ echo "  reflex chat        # natural-language CLI"
 echo "  reflex doctor      # check your install"
 echo "  reflex --help      # see all commands"
 echo
-note "Source: https://github.com/rylinjames/reflex-vla"
+note "Source: https://github.com/FastCrest/reflex-vla"

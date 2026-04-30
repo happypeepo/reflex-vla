@@ -18,7 +18,7 @@ Requires (pinned in the ``monolithic`` extra):
 
 The verified artifacts produced by this module match what the Modal
 scripts produce. See
-https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/measured_numbers.md
+https://github.com/FastCrest/reflex-vault/blob/main/reflex_vla/measured_numbers.md
 for the parity rows this export is responsible for.
 """
 from __future__ import annotations

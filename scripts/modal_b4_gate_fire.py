@@ -69,7 +69,7 @@ image = (
     .run_commands(
         # SHA-pinned so the image rebuilds on every commit (avoids stale-image cache).
         f'pip install "reflex-vla[serve,gpu] @ '
-        f'git+https://x-access-token:$GITHUB_TOKEN@github.com/rylinjames/reflex-vla@{_HEAD}"',
+        f'git+https://x-access-token:$GITHUB_TOKEN@github.com/FastCrest/reflex-vla@{_HEAD}"',
         secrets=[_gh_secret()],
     )
     .env({

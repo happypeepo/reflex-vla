@@ -8,9 +8,9 @@
 # nvidia container runtime.
 #
 # Use:
-#   docker pull ghcr.io/rylinjames/reflex-vla:<version>-arm64
+#   docker pull ghcr.io/fastcrest/reflex-vla:<version>-arm64
 #   docker run --runtime=nvidia --rm -v $(pwd)/exports:/exports \
-#     ghcr.io/rylinjames/reflex-vla:<version>-arm64
+#     ghcr.io/fastcrest/reflex-vla:<version>-arm64
 #
 # Image size: ~1.2 GB (no CUDA baked in).
 # If you want a fully-bundled JetPack image, watch for :<version>-jetpack

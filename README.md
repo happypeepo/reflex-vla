@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/reflex-vla.svg)](https://pypi.org/project/reflex-vla/)
 [![Python](https://img.shields.io/pypi/pyversions/reflex-vla.svg)](https://pypi.org/project/reflex-vla/)
-[![License](https://img.shields.io/pypi/l/reflex-vla.svg)](https://github.com/rylinjames/reflex-vla/blob/main/LICENSE)
+[![License](https://img.shields.io/pypi/l/reflex-vla.svg)](https://github.com/FastCrest/reflex-vla/blob/main/LICENSE)
 [![Downloads](https://img.shields.io/pypi/dm/reflex-vla.svg)](https://pypi.org/project/reflex-vla/)
 
 **The deployment layer for VLAs** — take a Vision-Language-Action model off the training cluster and onto a robot. Now with **`reflex chat`** — talk to your robot fleet in plain English.
@@ -212,21 +212,21 @@ Hidden legacy commands (`export`, `bench`, `replay`, etc.) stay callable for one
 
 ```bash
 # x86_64 CUDA runtime (cloud GPUs, dev workstations)
-docker pull ghcr.io/rylinjames/reflex-vla:latest
+docker pull ghcr.io/fastcrest/reflex-vla:latest
 docker run --gpus all \
   -v $(pwd)/p0:/exports \
   -p 8000:8000 \
-  ghcr.io/rylinjames/reflex-vla:latest
+  ghcr.io/fastcrest/reflex-vla:latest
 
 # Jetson Orin / Orin Nano / Thor (arm64 + nvidia container runtime)
-docker pull ghcr.io/rylinjames/reflex-vla:latest-arm64
+docker pull ghcr.io/fastcrest/reflex-vla:latest-arm64
 docker run --runtime=nvidia \
   -v $(pwd)/p0:/exports \
   -p 8000:8000 \
-  ghcr.io/rylinjames/reflex-vla:latest-arm64
+  ghcr.io/fastcrest/reflex-vla:latest-arm64
 ```
 
-The container's default command is `reflex serve /exports --host 0.0.0.0 --port 8000`. Override with any `reflex` subcommand: `docker run ... ghcr.io/rylinjames/reflex-vla:latest export <hf_id>` etc.
+The container's default command is `reflex serve /exports --host 0.0.0.0 --port 8000`. Override with any `reflex` subcommand: `docker run ... ghcr.io/fastcrest/reflex-vla:latest export <hf_id>` etc.
 
 Jetson arm64 image: built via QEMU cross-compile on tag push (`v*`). Bring-your-own-CUDA — the image deliberately doesn't bundle CUDA/cuDNN/TensorRT (those live on the Jetson under `/usr/local/cuda` and are ABI-locked to the host's JetPack version; the nvidia container runtime exposes them into the container).
 
@@ -334,7 +334,7 @@ The response JSON surfaces telemetry from each enabled wedge so you can see what
 
 **For Blackwell users right now:** the bootstrap installer accepts your hardware and the package installs cleanly, but `reflex go` will segfault at server startup. The real fix requires ORT to ship Blackwell-aware bundled binaries (no published timeline). Workarounds: chat-only mode (no GPU needed), `reflex doctor`, `reflex models list` all work fine. `/act` and TRT-engine inference need a non-Blackwell GPU temporarily.
 
-A Blackwell-specific runtime path via TensorRT-LLM (which DOES support sm_100) is planned for v0.7+ — see [reflex_context ADR queue](https://github.com/rylinjames/reflex-vla/issues).
+A Blackwell-specific runtime path via TensorRT-LLM (which DOES support sm_100) is planned for v0.7+ — see [reflex_context ADR queue](https://github.com/FastCrest/reflex-vla/issues).
 
 ## Composable runtime wedges
 

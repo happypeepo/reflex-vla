@@ -4,7 +4,7 @@ Imports lerobot's `SmolVLAPolicy` directly and wraps it behind the same
 `predict(image, instruction, state)` interface that `ReflexServer` exposes.
 Uses the real model's preprocessor / postprocessor pipelines so the 79
 silent-failure bugs catalogued at
-https://github.com/rylinjames/reflex-vault/tree/main/reflex_vla/02_bugs_fixed don't
+https://github.com/FastCrest/reflex-vault/tree/main/reflex_vla/02_bugs_fixed don't
 apply — correctness is delegated to upstream code.
 
 The only op we decompose is ``nn.RMSNorm`` (replaced with

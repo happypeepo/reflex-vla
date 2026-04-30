@@ -14,7 +14,7 @@ Apache 2.0, works today on x86 CUDA + desktop GPUs, Jetson support
 coming in v0.3.
 
 ```bash
-pip install 'reflex-vla[serve,gpu] @ git+https://github.com/rylinjames/reflex-vla'
+pip install 'reflex-vla[serve,gpu] @ git+https://github.com/FastCrest/reflex-vla'
 reflex export --monolithic lerobot/smolvla_base --output ./smol
 reflex serve ./smol
 # POST http://localhost:8000/act → 50-step action chunks
@@ -63,9 +63,9 @@ Every release is held against these; `tests/test_*.py` has receipt-based markers
 
 ## Try it + feedback
 
-- Repo: https://github.com/rylinjames/reflex-vla
-- Docker: `ghcr.io/rylinjames/reflex-vla:0.2.0`
-- Verified numbers: [`reflex_context/measured_numbers.md`](https://github.com/rylinjames/reflex-vla/blob/main/reflex_context/measured_numbers.md)
+- Repo: https://github.com/FastCrest/reflex-vla
+- Docker: `ghcr.io/fastcrest/reflex-vla:0.2.0`
+- Verified numbers: [`reflex_context/measured_numbers.md`](https://github.com/FastCrest/reflex-vla/blob/main/reflex_context/measured_numbers.md)
 - Issues: respond within 24h
 
 Apache 2.0. Single maintainer. Looking especially for:

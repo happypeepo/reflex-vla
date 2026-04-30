@@ -100,7 +100,7 @@ image = (
     )
     .run_commands(
         f'echo "build_bust={_BUILD_BUST}"',
-        f'pip install "reflex-vla @ git+https://x-access-token:$GITHUB_TOKEN@github.com/rylinjames/reflex-vla@{_HEAD}"',
+        f'pip install "reflex-vla @ git+https://x-access-token:$GITHUB_TOKEN@github.com/FastCrest/reflex-vla@{_HEAD}"',
         secrets=[modal.Secret.from_name("github-token")],
     )
 )

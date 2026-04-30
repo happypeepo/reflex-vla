@@ -10,16 +10,16 @@ This guide assumes a Linux box with an NVIDIA GPU. CPU-only deployments work wit
 
 ```bash
 # GPU box (requires CUDA 12 + cuDNN 9 — easiest via nvcr.io/nvidia/tensorrt container):
-pip install 'reflex-vla[serve,gpu] @ git+https://github.com/rylinjames/reflex-vla'
+pip install 'reflex-vla[serve,gpu] @ git+https://github.com/FastCrest/reflex-vla'
 
 # CPU-only box:
-pip install 'reflex-vla[serve,onnx] @ git+https://github.com/rylinjames/reflex-vla'
+pip install 'reflex-vla[serve,onnx] @ git+https://github.com/FastCrest/reflex-vla'
 ```
 
 Or for development from source:
 
 ```bash
-git clone https://github.com/rylinjames/reflex-vla
+git clone https://github.com/FastCrest/reflex-vla
 cd reflex-vla
 pip install -e '.[serve,gpu,dev]'  # or [serve,onnx,dev] for CPU
 ```
@@ -204,7 +204,7 @@ reflex export lerobot/smolvla_base --target orin-nano --output ./sv
 scp -r ./sv jetson:~/sv
 
 # On the Jetson (Jetpack 6.x with TensorRT preinstalled):
-pip install 'reflex-vla[serve] @ git+https://github.com/rylinjames/reflex-vla'
+pip install 'reflex-vla[serve] @ git+https://github.com/FastCrest/reflex-vla'
 reflex serve ./sv --port 8000 --device cuda
 ```
 
@@ -235,7 +235,7 @@ ORT 1.20+ requires CUDA 12.x + cuDNN 9.x. The pip-installed `nvidia-cudnn-cu12` 
 ```bash
 docker run --gpus all -it --rm nvcr.io/nvidia/tensorrt:24.10-py3
 # inside the container:
-pip install 'reflex-vla[serve,gpu] @ git+https://github.com/rylinjames/reflex-vla'
+pip install 'reflex-vla[serve,gpu] @ git+https://github.com/FastCrest/reflex-vla'
 reflex serve ...
 ```
 

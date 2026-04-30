@@ -11,7 +11,7 @@ so downstream clients don't need to change their input tensors.
 Pure ONNX → ONNX conversion; no retraining, no TensorRT dependency.
 Post-conversion, the FP16 ONNX goes through the same parity harness
 as the FP32 export. See
-https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/01_architecture/orin_nano_fp16_plan.md
+https://github.com/FastCrest/reflex-vault/blob/main/reflex_vla/01_architecture/orin_nano_fp16_plan.md
 for the full plan.
 """
 from __future__ import annotations

@@ -17,7 +17,7 @@ I've been building a standalone export + serve toolchain for flow-matching VLAs.
 | pi0.5 | `lerobot/pi05_base` | ✅ cos=+1.0000000 vs PyTorch @ num_steps=10, max_abs 2.38e-07 |
 | GR00T N1.6 | `nvidia/GR00T-N1.6-3B` | ✅ cos=+1.0000000 vs PyTorch (DiT+AdaLN single-step), max_abs 8.34e-07 |
 
-Repo: https://github.com/rylinjames/reflex-vla
+Repo: https://github.com/FastCrest/reflex-vla
 
 ### What's actually verified
 
@@ -47,13 +47,13 @@ Exporter uses onnx-diagnostic's `torch_export_patches(patch_transformers=True)` 
 
 ```bash
 # HTTP serve
-pip install 'reflex-vla[serve,gpu] @ git+https://github.com/rylinjames/reflex-vla'
+pip install 'reflex-vla[serve,gpu] @ git+https://github.com/FastCrest/reflex-vla'
 reflex export lerobot/smolvla_base --target desktop --output ./smol
 reflex serve ./smol --port 8000
 
 # Docker
 docker run --gpus all -v $(pwd)/smol:/exports -p 8000:8000 \
-  ghcr.io/rylinjames/reflex-vla:latest
+  ghcr.io/fastcrest/reflex-vla:latest
 
 # ROS2 (after sourcing ROS2 humble/iron/jazzy)
 reflex ros2-serve ./smol --rate-hz 20

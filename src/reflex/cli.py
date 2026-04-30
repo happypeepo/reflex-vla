@@ -35,7 +35,7 @@ _NOARGS_SUMMARY = """[bold]reflex[/bold] — deploy any VLA model to any edge ha
   [green]reflex models list[/green]         browse the curated model registry
 
 [dim]All commands:[/dim]  reflex --help
-[dim]Examples:[/dim]      https://github.com/rylinjames/reflex-vla/tree/main/examples
+[dim]Examples:[/dim]      https://github.com/FastCrest/reflex-vla/tree/main/examples
 [dim]Docs:[/dim]          https://fastcrest.com  ·  https://pypi.org/project/reflex-vla/
 """
 
@@ -2064,7 +2064,7 @@ def serve(
         if reflex_srv is None:
             console.print(
                 "[red]Could not find ReflexServer on the app state; MCP needs a live "
-                "inference engine. Report this at github.com/rylinjames/reflex-vla/issues.[/red]"
+                "inference engine. Report this at github.com/FastCrest/reflex-vla/issues.[/red]"
             )
             raise typer.Exit(1)
         mcp_srv = create_mcp_server(reflex_srv)

@@ -24,7 +24,7 @@ Reflex philosophy: we'd rather fail in <1s with a clear message
 than cost a customer 45 minutes of GPU to discover a config bug.
 
 Full v0.5 validator set defined in
-https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/01_architecture/finetune_architecture.md
+https://github.com/FastCrest/reflex-vault/blob/main/reflex_vla/01_architecture/finetune_architecture.md
 Section D.
 """
 from __future__ import annotations

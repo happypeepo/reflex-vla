@@ -181,7 +181,7 @@ License + repo visibility milestone.
 
 ### Changed
 - **License: Apache 2.0 → Business Source License 1.1** (auto-converts to Apache 2.0 in 4 years). Same source-available model HashiCorp, MongoDB, Sentry, Cockroach, and Couchbase use. Free for any non-competitive use (personal, commercial, internal); restricts only competing hosted/embedded offerings. Older releases (v0.3.x, v0.4.x) remain Apache-licensed forever — that grant cannot be retracted.
-- **GitHub repo flipped from private to public.** Source now visible at https://github.com/rylinjames/reflex-vla. Earlier hidden by accident.
+- **GitHub repo flipped from private to public.** Source now visible at https://github.com/FastCrest/reflex-vla. Earlier hidden by accident.
 
 ### Security
 - **Scrubbed leaked HuggingFace token** (`hf_rfnFx...`) from git history via `git filter-repo`. Also scrubbed accidentally-committed `.agents/` editor-agent session logs (135 files across 4 commits). The token has been revoked at huggingface.co.

@@ -29,7 +29,7 @@ There are other GPU clouds we could ask. We're asking GMI because we want to be 
 
 ## What we've actually shipped (proof of seriousness, not slideware)
 
-Everything below is on GitHub today at `github.com/rylinjames/reflex-vla` (MIT license, 0 contributors besides me, ~12K LoC):
+Everything below is on GitHub today at `github.com/FastCrest/reflex-vla` (MIT license, 0 contributors besides me, ~12K LoC):
 
 | What | Measured outcome | Where |
 |---|---|---|
@@ -116,7 +116,7 @@ We will not sign exclusivity. We will sign mutual case study + co-marketing righ
 A 30-min call to go through the experiment-by-experiment plan and confirm GMI infrastructure access (H100 vs H200, dedicated cluster availability, region for low-latency to a Hugging Face Hub mirror).
 
 Email: suranjana.jain@gmail.com
-GitHub: github.com/rylinjames/reflex-vla
+GitHub: github.com/FastCrest/reflex-vla
 Hugging Face: (add user's HF org link before sending)
 
 Happy to send a 1-pager version, share the public technical-plan vault, or jump on a call this week.

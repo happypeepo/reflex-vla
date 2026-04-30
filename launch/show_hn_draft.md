@@ -24,14 +24,14 @@ I built Reflex because the path from "we have a trained Vision-Language-Action m
 Getting pi0 / pi0.5 to cos=1.0 at num_steps=10 required three interacting patches (under `torch.export` + `transformers==5.3.0` + DynamicCache): (1) F.pad + logical AND for the block-causal mask instead of `torch.cat` (cat loses the suffix dim under FakeTensor); (2) freeze `DynamicLayer.update` during the unrolled Euler loop so the cache doesn't grow across iterations; (3) use `past_kv.get_seq_length()` instead of the pad-mask shape for mask assembly. GR00T's simpler DiT graph (no DynamicCache, no PaliGemma masking) traces cleanly with plain `torch.onnx.export(opset=19)` — no patches needed.
 
 ```bash
-pip install 'reflex-vla[serve,gpu] @ git+https://github.com/rylinjames/reflex-vla'
+pip install 'reflex-vla[serve,gpu] @ git+https://github.com/FastCrest/reflex-vla'
 reflex export lerobot/smolvla_base --output ./smol
 reflex serve ./smol --port 8000
 # POST /act returns 50-step action chunks
 ```
 
 **Also ships:**
-- Docker image published to GHCR (`ghcr.io/rylinjames/reflex-vla:latest`) — no CUDA driver wrangling
+- Docker image published to GHCR (`ghcr.io/fastcrest/reflex-vla:latest`) — no CUDA driver wrangling
 - ROS2 bridge (`reflex ros2-serve`) — subs image/state/task, pubs action chunks
 - Safety guard with NaN/Inf rejection + consecutive-clamp kill-switch
 - Auto-generated `VERIFICATION.md` per export directory — sha256 of every file, opset, and (after `reflex validate`) per-fixture cos/L2 numbers for audit
@@ -48,8 +48,8 @@ reflex serve ./smol --port 8000
 - **Orin Nano 8GB fit for pi0 / pi0.5.** The pi0 / pi0.5 monolithic ONNX is 12.5–13GB (FP32) and does not fit on Orin Nano 8GB in any precision once activations + OS are counted. SmolVLA (1.6GB) fits fine; GR00T (4.4GB) likely does in FP16 but is unverified on the Nano. pi-family models realistically need Orin 16GB+ or a desktop NVIDIA GPU. FP16 engine rebuild + Orin Nano fit is a v0.3 item
 - Earlier TRT FP16 latency tables were on a now-abandoned decomposed-ONNX path; latency re-measurement on the monolithic path is in v0.3
 
-Repo: https://github.com/rylinjames/reflex-vla
-Verified numbers ledger: [reflex_context/measured_numbers.md](https://github.com/rylinjames/reflex-vla/blob/main/reflex_context/measured_numbers.md)
+Repo: https://github.com/FastCrest/reflex-vla
+Verified numbers ledger: [reflex_context/measured_numbers.md](https://github.com/FastCrest/reflex-vla/blob/main/reflex_context/measured_numbers.md)
 
 Apache 2.0, single maintainer. Looking for testers — especially anyone with a real robot or a Jetson Orin Nano dev kit. Open an issue, I respond fast.
 

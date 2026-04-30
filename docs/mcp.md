@@ -96,7 +96,7 @@ pip install reflex-vla[mcp]
 Verify the `claude_desktop_config.json` path. On macOS, quit + relaunch Claude Desktop fully (cmd-Q, not just close the window).
 
 **"Could not find ReflexServer on the app state"**
-This shouldn't happen in released versions — file a bug at github.com/rylinjames/reflex-vla/issues.
+This shouldn't happen in released versions — file a bug at github.com/FastCrest/reflex-vla/issues.
 
 **stdio mode blocks the terminal**
 By design. stdio owns stdin/stdout for MCP's bidirectional framing. For interactive dev, use `--mcp-transport http` on a separate port.

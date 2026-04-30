@@ -109,7 +109,7 @@ image = (
         # Local timestamp in an echo cache-busts Modal's layer cache even
         # when _HEAD falls back to 'main' on the build server.
         f'echo "build_bust={_BUILD_BUST}"',
-        f'pip install "reflex-vla[monolithic] @ git+https://x-access-token:$GITHUB_TOKEN@github.com/rylinjames/reflex-vla@{_HEAD}"',
+        f'pip install "reflex-vla[monolithic] @ git+https://x-access-token:$GITHUB_TOKEN@github.com/FastCrest/reflex-vla@{_HEAD}"',
         secrets=[modal.Secret.from_name("github-token")],
     )
     .env({

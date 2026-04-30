@@ -4,7 +4,7 @@
 
 num_steps is baked in at export time. SmolVLA monolithic at num_steps=10
 is verified at machine precision (max_abs 5.96e-07 vs PyTorch; see
-https://github.com/rylinjames/reflex-vault/blob/main/reflex_vla/measured_numbers.md).
+https://github.com/FastCrest/reflex-vault/blob/main/reflex_vla/measured_numbers.md).
 num_steps=1 is also available.
 
 Interface mirrors Pi0OnnxServer so `reflex serve` can dispatch by

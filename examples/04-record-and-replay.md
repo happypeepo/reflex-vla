@@ -26,7 +26,7 @@ The server writes JSONL files like:
 
 Filename: `<YYYYMMDD-HHMMSS>-<model_hash>-<session_id>.jsonl[.gz]`. One file per server session. Compressed by default; pass `--record-no-gzip` for plain `.jsonl`.
 
-Each line is one `/act` request + response, schema documented in [docs/record_replay.md §D.1](https://github.com/rylinjames/reflex-vla/blob/main/docs/record_replay.md). Sensitive image bytes are SHA-256-hashed (not stored raw) by default — pass `--record-images full` to capture raw images (large, only for debug).
+Each line is one `/act` request + response, schema documented in [docs/record_replay.md §D.1](https://github.com/FastCrest/reflex-vla/blob/main/docs/record_replay.md). Sensitive image bytes are SHA-256-hashed (not stored raw) by default — pass `--record-images full` to capture raw images (large, only for debug).
 
 Now hit `/act` from your robot or test harness as usual. Every call gets logged.
 
