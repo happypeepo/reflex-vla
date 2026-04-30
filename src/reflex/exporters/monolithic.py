@@ -32,6 +32,21 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# Module-level "denoise phase" flag. apply_export_patches() installs a
+# wrapped DynamicLayer.update that returns cat(past, new) WITHOUT mutating
+# self.keys/values when this flag is True. The denoise_step wrappers for
+# both PI0Pytorch (apply_export_patches) and PI05Pytorch
+# (_apply_pi05_denoise_step_patch) toggle this flag for the duration of
+# the expert pass, so the cache stays at prefix size across unrolled Euler
+# iterations under torch.export. Pre-2026-04-30 this lived as a closure
+# variable inside apply_export_patches, accessible only to the pi0 wrapper —
+# pi0.5 fell through to the original mutating update, growing the cache
+# 968 -> 1018 -> 1068 -> ... across 10 iterations and pinning baked /
+# per-step parity at cos = 0.018 (per-step doesn't grow cache between
+# Python-loop calls). See 03_experiments/2026-04-30-per-step-parity-modal-a100.md.
+_denoise_phase: list[bool] = [False]
+
+
 _CCM_NONE_RATIONALE = (
     "The `create_causal_mask -> None` shim is load-bearing for num_steps>1. "
     "Transformers 5.3 rebuilds a prefix-only [1,1,Q,past_len] mask that fails "
@@ -257,7 +272,6 @@ def apply_export_patches() -> None:
         from lerobot.policies.pi0 import modeling_pi0 as _mp0
         from lerobot.policies.pi0.modeling_pi0 import make_att_2d_masks as _make_att_2d_masks
 
-        _denoise_phase = [False]
         _orig_layer_update = _DL.update
 
         def _frozen_layer_update(self, key_states, value_states, cache_kwargs=None):
@@ -830,7 +844,16 @@ def export_pi05_monolithic(
 def _apply_pi05_denoise_step_patch() -> None:
     """Patch PI05Pytorch.denoise_step with the F.pad mask + frozen-cache
     flag. Called from export_pi05_monolithic after apply_export_patches(),
-    which already installed the DynamicLayer.update freeze + sets the flag.
+    which already installed the DynamicLayer.update freeze.
+
+    The wrapper toggles the module-level _denoise_phase flag for the
+    duration of the expert pass — same pattern as apply_export_patches'
+    PI0Pytorch wrapper. Without this, pi0.5's traced cache mutates each
+    Euler iteration (cache grows 968->1018->...->1418 across n=10), and
+    the resulting baked ONNX no longer matches a per-step ONNX driven N
+    times in Python (per-step rebuilds cache per call -> stays at 968+50).
+    Pre-2026-04-30 the flag was set only for pi0; the per-step parity gate
+    surfaced this asymmetry at cos=0.018 / max_abs=1.336.
     """
     try:
         import torch
@@ -879,7 +902,16 @@ def _apply_pi05_denoise_step_patch() -> None:
             suffix_out = suffix_out.to(dtype=torch.float32)
             return self.action_out_proj(suffix_out)
 
-        _mp05.PI05Pytorch.denoise_step = _patched
+        _dstep_inner_pi05 = _patched
+
+        def _denoise_step_with_flag_pi05(self, prefix_pad_masks, past_key_values, x_t, timestep):
+            _denoise_phase[0] = True
+            try:
+                return _dstep_inner_pi05(self, prefix_pad_masks, past_key_values, x_t, timestep)
+            finally:
+                _denoise_phase[0] = False
+
+        _mp05.PI05Pytorch.denoise_step = _denoise_step_with_flag_pi05
     except ImportError:
         pass
 
