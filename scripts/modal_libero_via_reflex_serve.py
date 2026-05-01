@@ -185,6 +185,8 @@ def libero_via_serve(
     bid_n_candidates: int = 0,
     bid_coherence_window: int = 5,
     bid_coherence_metric: str = "l2",
+    rtc: bool = False,
+    rtc_execution_horizon: int = 0,
     seed: int = 7,
     serve_health_timeout_s: int = 480,
     serve_port: int = 8000,
@@ -250,6 +252,10 @@ def libero_via_serve(
         serve_cmd.extend(["--bid-num-candidates", str(int(bid_n_candidates))])
         serve_cmd.extend(["--bid-coherence-window", str(int(bid_coherence_window))])
         serve_cmd.extend(["--bid-coherence-metric", bid_coherence_metric])
+    if rtc:
+        serve_cmd.append("--rtc")
+        if rtc_execution_horizon > 0:
+            serve_cmd.extend(["--rtc-execution-horizon", str(int(rtc_execution_horizon))])
 
     print(f"[libero_via_serve] starting: {' '.join(serve_cmd)}")
     serve_proc = subprocess.Popen(
@@ -489,6 +495,8 @@ def main(
     bid_n_candidates: int = 0,
     bid_coherence_window: int = 5,
     bid_coherence_metric: str = "l2",
+    rtc: bool = False,
+    rtc_execution_horizon: int = 0,
 ):
     """Run LIBERO via reflex serve.
 
@@ -520,6 +528,8 @@ def main(
         bid_n_candidates=bid_n_candidates,
         bid_coherence_window=bid_coherence_window,
         bid_coherence_metric=bid_coherence_metric,
+        rtc=rtc,
+        rtc_execution_horizon=rtc_execution_horizon,
     )
     print("\n=== RESULT ===")
     if r.get("status") == "fail":
