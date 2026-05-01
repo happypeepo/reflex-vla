@@ -131,8 +131,19 @@ def bench_one(export_dir: str, label: str) -> dict:
     if not (Path(export_dir) / "expert_denoise.onnx").exists():
         raise FileNotFoundError(f"Export missing at {export_dir}. Run gate 3 first.")
 
+    # Pin cudnn algo selection so both baked + per-step pick the same kernel
+    # (v3 showed baked vlm bimodal between ~45ms / ~91ms, per-step stuck at
+    # ~91ms — likely ORT's EXHAUSTIVE autotuner picking different cudnn
+    # convolution algorithms for the two sessions despite identical graph
+    # topology). HEURISTIC = deterministic, fast warmup, no autotune drift.
     log.info("[%s] Building Pi05DecomposedInference from %s", label, export_dir)
-    inf = Pi05DecomposedInference(export_dir=export_dir, cache_level="none")
+    providers = [
+        ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}),
+        "CPUExecutionProvider",
+    ]
+    inf = Pi05DecomposedInference(
+        export_dir=export_dir, cache_level="none", providers=providers,
+    )
 
     B = 1
     img_h, img_w = 224, 224
