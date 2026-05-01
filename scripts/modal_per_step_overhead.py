@@ -58,7 +58,7 @@ def _hf_secret():
 
 
 # Pin build_bust so the image cache from gate 3 stays warm.
-_BUST = "20260430-per-step-gates"
+_BUST = "20260501-per-step-gates-curand-fix"
 
 hf_cache = modal.Volume.from_name("pi0-hf-cache", create_if_missing=True)
 onnx_output = modal.Volume.from_name("pi0-onnx-outputs", create_if_missing=True)
@@ -84,6 +84,12 @@ image = (
         "draccus",
         "nvidia-cudnn-cu12>=9.0,<10.0",
         "nvidia-cublas-cu12>=12.0,<13.0",
+        # The parity image picked these up transitively via torch 2.10.
+        # Pinning explicitly so the overhead script's image build is
+        # CUDA-EP-loadable regardless of pip's transitive resolution.
+        "nvidia-curand-cu12>=10.0,<12.0",
+        "nvidia-cuda-runtime-cu12>=12.0,<13.0",
+        "nvidia-cufft-cu12>=11.0,<12.0",
     )
     .add_local_dir(
         os.path.join(REPO_ROOT, "src"),
@@ -159,6 +165,11 @@ def overhead_bench() -> dict:
     actual_baked = sess_baked.get_providers()[0]
     actual_per_step = sess_per_step.get_providers()[0]
     log.info("providers: baked=%s, per_step=%s", actual_baked, actual_per_step)
+    # Strict provider check — silent CPU fallback voids the bench
+    if actual_baked != "CUDAExecutionProvider":
+        raise RuntimeError(f"baked session fell back to {actual_baked}; CUDA EP load failed")
+    if actual_per_step != "CUDAExecutionProvider":
+        raise RuntimeError(f"per-step session fell back to {actual_per_step}; CUDA EP load failed")
 
     rng = np.random.default_rng(seed=42)
     prefix_seq_len = 968
