@@ -1387,25 +1387,40 @@ def create_app(
             # under --rtc without explicit replan flags. Caught 2026-04-30
             # in gate-6 LIBERO smoke for per-step expert export.)
             _buf = getattr(server, "_action_buffer", None)
-            if _buf is None and hasattr(server, "configure_replan"):
-                logger.info(
-                    "--rtc requires action_buffer; auto-configuring "
-                    "replan_hz=20 execute_hz=100 (pass --replan-hz / "
-                    "--execute-hz to override)"
+            if _buf is None:
+                # Server (e.g. Pi05DecomposedServer) may not have
+                # configure_replan/_action_buffer wired up. In either case
+                # RTC needs a buffer for merge_and_update's carry-forward,
+                # so build one directly. Use the chunk_size from the loaded
+                # model when available so the buffer can hold a full chunk.
+                from reflex.runtime.buffer import ActionChunkBuffer
+                _chunk = (
+                    getattr(server, "chunk_size", None)
+                    or getattr(server, "action_horizon", None)
+                    or _monolithic_cfg.get("chunk_size")
+                    or _monolithic_cfg.get("decomposed", {}).get("chunk_size")
+                    or 50
                 )
-                try:
-                    server.configure_replan(replan_hz=20.0, execute_hz=100.0)
-                    _buf = getattr(server, "_action_buffer", None)
-                except Exception as e:
-                    logger.error(
-                        "Auto configure_replan failed; RTC requires action_buffer "
-                        "to function — disabling RTC for this run: %s", e,
-                    )
-                    server.rtc_adapter = None  # type: ignore[attr-defined]
-                    raise SystemExit(  # surface loudly instead of silent no-op
-                        f"--rtc requires action_buffer init; "
-                        f"configure_replan failed: {e}"
-                    )
+                _buf = ActionChunkBuffer(capacity=int(_chunk))
+                # Stash on server too so any other RTC consumer can find it.
+                server._action_buffer = _buf  # type: ignore[attr-defined]
+                logger.info(
+                    "--rtc auto-built ActionChunkBuffer(capacity=%d) — "
+                    "server class %s lacks configure_replan or it wasn't "
+                    "called; pass --replan-hz/--execute-hz to override",
+                    _chunk, type(server).__name__,
+                )
+                if hasattr(server, "configure_replan"):
+                    # If the server DOES support replan, also wire the
+                    # replan tracker for any other code paths that read
+                    # _replan_hz/_execute_hz. Best-effort.
+                    try:
+                        server.configure_replan(replan_hz=20.0, execute_hz=100.0)
+                    except Exception as e:
+                        logger.warning(
+                            "configure_replan call failed (buffer was built "
+                            "directly so RTC still works): %s", e,
+                        )
             server.rtc_adapter = RtcAdapter(  # type: ignore[attr-defined]
                 policy=server,
                 action_buffer=_buf,
