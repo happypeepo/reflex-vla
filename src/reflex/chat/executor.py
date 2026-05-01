@@ -87,6 +87,14 @@ def _build_pull(p: dict[str, Any]) -> list[str]:
     return ["models", "pull", str(p["model"])]
 
 
+def _build_list_models(p: dict[str, Any]) -> list[str]:
+    args = ["models", "list", "--format", "json"]
+    _flag(args, "family", p.get("family"))
+    _flag(args, "device", p.get("device"))
+    _flag(args, "embodiment", p.get("embodiment"))
+    return args
+
+
 def _build_model_info(p: dict[str, Any]) -> list[str]:
     return ["models", "info", str(p["model"])]
 
@@ -121,7 +129,6 @@ def _build_replay(p: dict[str, Any]) -> list[str]:
 
 # Builders that take no args — just static argv.
 _STATIC = {
-    "list_models": ["models", "list"],
     "list_targets": ["inspect", "targets"],
     "doctor": ["doctor"],
     "show_status": ["status"],
@@ -135,6 +142,7 @@ _BUILDERS = {
     "serve_model": _build_serve,
     "benchmark": _build_bench,
     "evaluate": _build_eval,
+    "list_models": _build_list_models,
     "pull_model": _build_pull,
     "model_info": _build_model_info,
     "distill": _build_distill,

@@ -97,8 +97,32 @@ TOOLS: list[dict[str, Any]] = [
     ),
     _tool(
         "list_models",
-        "List models available locally (already pulled or exported).",
-        {"properties": {}},
+        (
+            "The canonical registry of every model Reflex supports — model_id, "
+            "family, params, size_mb, supported devices, supported embodiments, "
+            "license. This is the SOURCE OF TRUTH for any question about which "
+            "models exist, what hardware they run on, or which fits a constraint. "
+            "Always call this before naming a model, family, or hardware-support "
+            "claim. Optional filters narrow the result set so you don't have to "
+            "chain list_models + many model_info calls."
+        ),
+        {
+            "properties": {
+                "family": {
+                    "type": "string",
+                    "description": "Filter by family: pi0, pi05, smolvla, openvla, groot",
+                },
+                "device": {
+                    "type": "string",
+                    "description": "Filter by supported device (orin_nano, agx_orin, thor, a10g, a100, h100, h200)",
+                    "enum": _DEVICE_CLASSES,
+                },
+                "embodiment": {
+                    "type": "string",
+                    "description": "Filter by supported embodiment (franka, so100, ur5)",
+                },
+            },
+        },
     ),
     _tool(
         "pull_model",
