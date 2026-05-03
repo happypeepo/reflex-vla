@@ -16,12 +16,11 @@ Worker's PRIVATE_KEY secret and never appears in this codebase.
 """
 from __future__ import annotations
 
-# Replace this placeholder with the public_key_b64 from POST /admin/init.
-# Until you do, license verification will fail loudly with a helpful error
-# pointing operators at the deploy steps.
-BUNDLED_PUBLIC_KEY_B64 = ""
+# Public key bundled at deploy time (license worker first ran /admin/init
+# 2026-05-03). To rotate: regenerate at the worker and replace these constants.
+BUNDLED_PUBLIC_KEY_B64 = "luURwH5bpH5qHc7eTa3xyCiTc4X6cqXzunzw0bCeSzw="
 
-# Key ID of the bundled public key. Returned by POST /admin/init alongside
-# the public key. Used to verify the signature was made with a key the
-# client knows about.
-BUNDLED_KEY_ID = ""
+# Key ID of the bundled public key. Used to verify the signature was made
+# with a key the client knows about (rejects licenses signed by a different
+# deployment, e.g., a forked or compromised license server).
+BUNDLED_KEY_ID = "key_moq2zo8m_279ec0def41c69b8"
