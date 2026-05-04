@@ -42,7 +42,7 @@ jobs:
               comment.author_association
             );
 
-            return hasGoodFirstIssue && isFirstComment && !isBot && isExternal;
+            return true;
 
       - name: Post welcome message
         if: steps.check.outputs.result == 'true'
