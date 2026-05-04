@@ -271,4 +271,10 @@ def create_mcp_server(
             return "# reflex.observability.prometheus unavailable\n"
         return render_metrics().decode("utf-8")
 
+    @mcp.resource("version://current")
+    async def current_version() -> str:
+        """Return current server version."""
+        from reflex import __version__
+        return __version__
+
     return mcp
