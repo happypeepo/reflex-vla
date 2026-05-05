@@ -53,6 +53,10 @@ export default {
         return await adminAuth(request, env, () => adminManualPurge(request, env));
       if (method === "POST" && path === "/v1/uploads/sign")
         return await postUploadsSign(request, env);
+      if (method === "PUT" && path.startsWith("/v1/uploads/put/")) {
+        const uploadId = path.split("/").pop();
+        return await putUploadBytes(uploadId, request, env);
+      }
       if (method === "POST" && path === "/v1/uploads/complete")
         return await postUploadsComplete(request, env);
       if (method === "POST" && path === "/v1/revoke/cascade")
@@ -255,12 +259,79 @@ async function postUploadsSign(request, env) {
 }
 
 /**
+ * PUT /v1/uploads/put/:upload_id
+ *
+ * Receives the raw upload bytes and writes them to R2 at the r2_key reserved
+ * by /v1/uploads/sign. The worker is acting as the upload proxy here (vs
+ * issuing AWS SigV4 signed URLs that would let the client PUT to R2 directly).
+ * This is the "Phase 1 simple path" called out in /sign's note.
+ *
+ * Refuses if:
+ *   - upload_id not found
+ *   - upload status != "pending"
+ *   - signed_at older than SIGNED_URL_TTL_SECONDS
+ *   - byte size doesn't match what was signed (with 1% tolerance)
+ *   - contributor was revoked between sign + put
+ */
+async function putUploadBytes(uploadId, request, env) {
+  const upload = await env.DB.prepare(
+    `SELECT u.upload_id, u.contributor_id, u.r2_key, u.byte_size, u.status,
+            u.signed_at, c.revoked_at
+       FROM uploads u
+       LEFT JOIN contributors c ON c.contributor_id = u.contributor_id
+       WHERE u.upload_id = ?`
+  ).bind(uploadId).first();
+  if (!upload) return jsonResponse(404, { error: "upload_not_found" });
+  if (upload.status !== "pending") {
+    return jsonResponse(409, { error: "upload_not_pending", status: upload.status });
+  }
+  if (upload.revoked_at) {
+    return jsonResponse(403, { error: "contributor_revoked_between_sign_and_put" });
+  }
+  const signedAtMs = Date.parse(upload.signed_at);
+  if (Date.now() - signedAtMs > SIGNED_URL_TTL_SECONDS * 1000) {
+    return jsonResponse(410, { error: "upload_url_expired", signed_at: upload.signed_at });
+  }
+
+  const body = await request.arrayBuffer();
+  const actualSize = body.byteLength;
+  // 1% tolerance for header / framing variance.
+  const diff = Math.abs(actualSize - upload.byte_size);
+  if (diff > Math.max(1024, upload.byte_size * 0.01)) {
+    return jsonResponse(400, {
+      error: "byte_size_mismatch",
+      signed_byte_size: upload.byte_size,
+      actual_byte_size: actualSize,
+    });
+  }
+
+  await env.CURATE_BUCKET.put(upload.r2_key, body, {
+    httpMetadata: { contentType: "application/x-jsonlines" },
+    customMetadata: {
+      contributor_id: upload.contributor_id,
+      upload_id: uploadId,
+    },
+  });
+
+  return jsonResponse(200, {
+    upload_id: uploadId,
+    r2_key: upload.r2_key,
+    bytes_received: actualSize,
+    note: "POST /v1/uploads/complete to record the success.",
+  });
+}
+
+
+/**
  * POST /v1/uploads/complete
  *
  * Body: { upload_id: string, episode_count: number }
  *
  * Records the upload as completed, increments stats + daily counters.
  * Idempotent — calling twice on the same upload_id is a no-op.
+ *
+ * Verifies the bytes actually landed in R2 (HEAD on the r2_key) — refuses
+ * to mark "completed" if the object doesn't exist.
  */
 async function postUploadsComplete(request, env) {
   const body = await request.json().catch(() => null);
@@ -271,11 +342,22 @@ async function postUploadsComplete(request, env) {
   if (!uploadId) return jsonResponse(400, { error: "missing_upload_id" });
 
   const upload = await env.DB.prepare(
-    `SELECT upload_id, contributor_id, byte_size, status, signed_at FROM uploads WHERE upload_id = ?`
+    `SELECT upload_id, contributor_id, r2_key, byte_size, status, signed_at FROM uploads WHERE upload_id = ?`
   ).bind(uploadId).first();
   if (!upload) return jsonResponse(404, { error: "upload_not_found" });
   if (upload.status !== "pending") {
     return jsonResponse(200, { status: upload.status, idempotent: true });
+  }
+
+  // Verify the bytes actually landed in R2. Refuse to mark "completed" if
+  // the client called /complete without first PUTing the bytes.
+  const r2Object = await env.CURATE_BUCKET.head(upload.r2_key);
+  if (!r2Object) {
+    return jsonResponse(412, {
+      error: "r2_object_not_found",
+      r2_key: upload.r2_key,
+      hint: "PUT bytes to /v1/uploads/put/<upload_id> first",
+    });
   }
 
   const nowIso = new Date().toISOString();

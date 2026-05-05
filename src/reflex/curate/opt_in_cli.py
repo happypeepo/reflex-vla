@@ -228,19 +228,36 @@ def _cmd_revoke(*, yes: bool) -> None:
     # Local: remove the receipt now.
     curate_consent.revoke()
 
-    # Server-side cascade: POST to the contribution worker.
-    # Phase 1: worker not yet deployed — log + show the manual fallback.
-    # When the worker ships, replace this stub with an httpx.post call.
+    # Server-side cascade: POST to /v1/revoke/cascade.
     contributor_id = receipt.contributor_id
     logger.info("curate revoke requested for contributor_id=%s", contributor_id)
+    server_request_id = None
+    try:
+        import httpx
+        from reflex.curate.uploader import _worker_url, HTTP_TIMEOUT_S
+        r = httpx.post(
+            f"{_worker_url()}/v1/revoke/cascade",
+            json={"contributor_id": contributor_id, "scope": "all"},
+            timeout=HTTP_TIMEOUT_S,
+        )
+        if r.status_code == 200:
+            server_request_id = r.json().get("request_id")
+        else:
+            logger.warning(
+                "revoke cascade returned status=%d body=%s", r.status_code, r.text[:200],
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("revoke cascade POST failed: %s", exc)
+
     console.print(messaging.revoke_success(contributor_id=contributor_id))
-    console.print(
-        "[dim]Phase 1 note: the contribution worker is not yet deployed, so the "
-        "server-side cascade purge is queued locally. Once the worker is live, "
-        "future revocations will trigger the cascade automatically. To request "
-        "manual purge in the meantime, email [cyan]privacy@fastcrest.com[/cyan] "
-        "with your contributor_id above.[/dim]"
-    )
+    if server_request_id:
+        console.print(f"[dim]Server-side cascade request_id: {server_request_id}[/dim]")
+    else:
+        console.print(
+            "[yellow]⚠[/yellow]  Could not reach the contribution worker — local "
+            "receipt was still removed. To trigger server-side cascade manually, "
+            "email [cyan]privacy@fastcrest.com[/cyan] with your contributor_id above."
+        )
 
 
 def _cmd_status() -> None:
@@ -267,16 +284,63 @@ def _cmd_status() -> None:
         f"[dim]{Path(curate_consent.DEFAULT_CONSENT_PATH).expanduser()}[/dim]",
     )
     console.print(table)
-
-    # Phase 1.5+ will populate hours / episodes from the uploader's stats:
-    # console.print(f"Hours contributed: {hours:.1f}")
-    # console.print(f"Episodes contributed: {episodes}")
     console.print()
-    console.print(
-        "[dim]Hours / episode counts will appear here once the uploader "
-        "ships in Phase 1 (uploader spec: features/08_curate/_collection/"
-        "data-collection-free-tier.md).[/dim]"
-    )
+
+    # Live contribution stats from the worker.
+    stats = _fetch_live_stats(receipt.contributor_id)
+    if stats is None:
+        console.print(
+            "[dim]Could not reach the contribution worker — live counts "
+            "unavailable. Local queue: [cyan]reflex contribute --inspect[/cyan].[/dim]"
+        )
+        return
+    if stats.get("error") == "not_found":
+        console.print(
+            "[dim]No uploads recorded server-side yet — once your first session "
+            "uploads, totals will appear here. Local queue: "
+            "[cyan]reflex contribute --inspect[/cyan].[/dim]"
+        )
+        return
+
+    live_table = Table(show_header=False, box=None, pad_edge=False, title="Server-side totals")
+    live_table.add_column(style="bold")
+    live_table.add_column()
+    live_table.add_row("Episodes contributed:", str(stats.get("total_episodes", 0)))
+    live_table.add_row("Total uploads:", str(stats.get("total_uploads", 0)))
+    total_bytes = int(stats.get("total_bytes", 0))
+    if total_bytes >= 1_000_000_000:
+        size_str = f"{total_bytes / 1_000_000_000:.2f} GB"
+    elif total_bytes >= 1_000_000:
+        size_str = f"{total_bytes / 1_000_000:.1f} MB"
+    else:
+        size_str = f"{total_bytes / 1024:.1f} KB"
+    live_table.add_row("Total bytes:", size_str)
+    last_active = stats.get("last_active_at")
+    if last_active:
+        live_table.add_row("Last upload:", str(last_active))
+    if stats.get("revoked_at"):
+        live_table.add_row("Revoked at:", f"[red]{stats['revoked_at']}[/red]")
+    console.print(live_table)
+
+
+def _fetch_live_stats(contributor_id: str) -> dict | None:
+    """GET /v1/contributors/<id>/stats. Returns None on connection error,
+    {error: 'not_found'} on 404, or the worker's response dict on 200."""
+    try:
+        import httpx
+        from reflex.curate.uploader import _worker_url, HTTP_TIMEOUT_S
+        r = httpx.get(
+            f"{_worker_url()}/v1/contributors/{contributor_id}/stats",
+            timeout=HTTP_TIMEOUT_S,
+        )
+        if r.status_code == 404:
+            return {"error": "not_found"}
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("fetch live stats failed: %s", exc)
+        return None
 
 
 def _cmd_inspect() -> None:

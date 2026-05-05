@@ -2077,24 +2077,29 @@ def create_app(
                 logger.warning("Pro heartbeat scaffolding failed: %s", exc)
 
         # Curate uploader scaffolding — daily background upload of the
-        # contribution queue at ~/.reflex/contribute/queue/. Phase 1 runs
-        # in dry-run mode (the contribution worker has not been deployed
-        # yet); when live=True is enabled and the worker is up, this is
-        # the path that ships data to R2.
+        # contribution queue at ~/.reflex/contribute/queue/. Posts to the
+        # live contribution-worker (https://reflex-contributions.fastcrest
+        # .workers.dev) by default. Set REFLEX_CURATE_DRY_RUN=1 to keep
+        # files locally without uploading; REFLEX_CONTRIB_ENDPOINT to point
+        # at a self-hosted worker.
         _curate_uploader = None
         try:
             from reflex.curate import consent as _curate_consent
             if _curate_consent.is_opted_in():
                 from reflex.curate.uploader import Uploader as _CurateUploader
                 _curate_receipt = _curate_consent.load()
+                _curate_dry_run = os.environ.get("REFLEX_CURATE_DRY_RUN", "").lower() in ("1", "true", "yes")
                 _curate_uploader = _CurateUploader(
                     contributor_id=_curate_receipt.contributor_id,
-                    live=False,  # Phase 1 dry-run; flip to True when worker deploys
+                    tier=_curate_receipt.tier,
+                    opted_in_at=_curate_receipt.opted_in_at,
+                    privacy_mode=_curate_receipt.privacy_mode,
+                    live=not _curate_dry_run,
                 )
                 _curate_uploader.start()
                 logger.info(
-                    "curate uploader started (dry-run; contributor_id=%s)",
-                    _curate_receipt.contributor_id,
+                    "curate uploader started (live=%s; contributor_id=%s)",
+                    not _curate_dry_run, _curate_receipt.contributor_id,
                 )
         except Exception as exc:  # noqa: BLE001 — never block startup on uploader scaffolding
             logger.warning("curate uploader scaffolding failed: %s", exc)

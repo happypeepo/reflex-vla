@@ -51,6 +51,21 @@ DEFAULT_DAILY_INTERVAL_S = 86_400.0  # 24h between scheduled passes
 KILL_SWITCH_ENV = "REFLEX_NO_CONTRIB_UPLOAD"
 THROTTLE_ENV = "REFLEX_CONTRIB_MAX_MBPS"
 
+# Live contribution-worker endpoint. Override via REFLEX_CONTRIB_ENDPOINT for
+# testing or self-hosting. Endpoints (per infra/contribution-worker/README.md):
+#   POST /v1/uploads/sign         — issue signed PUT URL for an upload
+#   PUT  /v1/uploads/put/<id>     — receive raw bytes (worker proxies to R2)
+#   POST /v1/uploads/complete     — record success + update stats
+#   POST /v1/revoke/cascade       — mark contributor for purge
+#   GET  /v1/contributors/<id>/stats  — return contribution totals
+DEFAULT_WORKER_URL = "https://reflex-contributions.fastcrest.workers.dev"
+WORKER_URL_ENV = "REFLEX_CONTRIB_ENDPOINT"
+HTTP_TIMEOUT_S = 30.0
+
+
+def _worker_url() -> str:
+    return os.environ.get(WORKER_URL_ENV, DEFAULT_WORKER_URL).rstrip("/")
+
 
 def _kill_switch_active() -> bool:
     return os.environ.get(KILL_SWITCH_ENV, "").strip().lower() in ("1", "true", "yes", "on")
@@ -216,30 +231,136 @@ def filter_episodes(
     return accepted, stats
 
 
-# ── R2 transport (Phase 1: stubbed — worker not yet deployed) ──────────────────
+# ── R2 transport via the contribution worker ─────────────────────────────────
 
 
 class UploadStub(Exception):
-    """Marker raised by the Phase 1 stub to indicate the worker is not yet live."""
+    """Raised when the live transport can't be used (e.g. httpx missing,
+    or kill switch active in a context where uploader was asked to run live)."""
 
 
-def _request_signed_url(*, contributor_id: str, file_name: str) -> str:
-    """Phase 1 stub: returns a marker URL. Phase 1.5 will POST to the
-    contribution worker for a real signed PUT URL."""
-    raise UploadStub(
-        f"contribution worker not yet deployed; would request signed URL "
-        f"for contributor_id={contributor_id} file={file_name}"
+class WorkerError(Exception):
+    """Raised when the contribution worker returns a non-2xx response that
+    isn't a recoverable rate limit. Caller logs + skips the file for this pass."""
+
+    def __init__(self, status: int, body: dict[str, Any] | None = None):
+        self.status = status
+        self.body = body or {}
+        super().__init__(f"worker_error status={status} body={self.body}")
+
+
+class RateLimited(Exception):
+    """Raised when the worker returns 429 — caller skips the file this pass
+    and tries again on the next interval."""
+
+
+class ContributorRevoked(Exception):
+    """Raised when the worker returns 403 contributor_revoked — the local
+    consent receipt should be cleared. Surface to operator via WARN log."""
+
+
+def _request_signed_url(
+    *,
+    contributor_id: str,
+    tier: str,
+    opted_in_at: str,
+    file_name: str,
+    byte_size: int,
+    episode_count: int,
+    privacy_mode: str,
+) -> dict[str, Any]:
+    """POST /v1/uploads/sign. Returns the worker's response dict
+    {upload_id, r2_key, put_url, expires_at}. Raises RateLimited on 429,
+    ContributorRevoked on 403, WorkerError on other non-2xx."""
+    try:
+        import httpx
+    except ImportError as exc:
+        raise UploadStub(f"httpx not available — install reflex-vla[serve]: {exc}") from exc
+
+    url = f"{_worker_url()}/v1/uploads/sign"
+    payload = {
+        "contributor_id": contributor_id,
+        "tier": tier,
+        "opted_in_at": opted_in_at,
+        "file_name": file_name,
+        "byte_size": int(byte_size),
+        "episode_count": int(episode_count),
+        "privacy_mode": privacy_mode,
+    }
+    r = httpx.post(url, json=payload, timeout=HTTP_TIMEOUT_S)
+    if r.status_code == 429:
+        raise RateLimited(r.text)
+    if r.status_code == 403:
+        body = _safe_json(r)
+        if body.get("error") == "contributor_revoked":
+            raise ContributorRevoked(str(body))
+        raise WorkerError(r.status_code, body)
+    if r.status_code != 200:
+        raise WorkerError(r.status_code, _safe_json(r))
+    return r.json()
+
+
+def _put_bytes(*, put_url: str, file_bytes: bytes, max_mbps: float) -> int:
+    """PUT the raw bytes to the worker's /v1/uploads/put/<id> endpoint.
+    Throttles to `max_mbps` by chunked sends with sleep gating between chunks.
+    Returns bytes uploaded on success."""
+    try:
+        import httpx
+    except ImportError as exc:
+        raise UploadStub(f"httpx not available: {exc}") from exc
+
+    headers = {"Content-Type": "application/x-jsonlines"}
+    if max_mbps <= 0:
+        # No throttle — single shot.
+        r = httpx.put(put_url, content=file_bytes, headers=headers, timeout=HTTP_TIMEOUT_S * 4)
+    else:
+        # Chunked send with sleep throttle. Chunk size targets ~250ms of bandwidth.
+        chunk_bytes = max(64 * 1024, int(max_mbps * 1024 * 1024 * 0.25))
+
+        def _chunked() -> Any:
+            for i in range(0, len(file_bytes), chunk_bytes):
+                yield file_bytes[i : i + chunk_bytes]
+                time.sleep(0.25)
+
+        r = httpx.put(
+            put_url, content=_chunked(), headers=headers,
+            timeout=HTTP_TIMEOUT_S * 4,
+        )
+    if r.status_code == 410:
+        raise WorkerError(r.status_code, _safe_json(r))  # URL expired
+    if r.status_code == 403:
+        body = _safe_json(r)
+        if body.get("error") == "contributor_revoked_between_sign_and_put":
+            raise ContributorRevoked(str(body))
+        raise WorkerError(r.status_code, body)
+    if r.status_code != 200:
+        raise WorkerError(r.status_code, _safe_json(r))
+    body = r.json()
+    return int(body.get("bytes_received", len(file_bytes)))
+
+
+def _complete_upload(*, upload_id: str, episode_count: int) -> dict[str, Any]:
+    """POST /v1/uploads/complete. Returns the worker's response."""
+    try:
+        import httpx
+    except ImportError as exc:
+        raise UploadStub(f"httpx not available: {exc}") from exc
+
+    url = f"{_worker_url()}/v1/uploads/complete"
+    r = httpx.post(
+        url, json={"upload_id": upload_id, "episode_count": int(episode_count)},
+        timeout=HTTP_TIMEOUT_S,
     )
+    if r.status_code != 200:
+        raise WorkerError(r.status_code, _safe_json(r))
+    return r.json()
 
 
-def _put_to_r2(*, signed_url: str, file_bytes: bytes, max_mbps: float) -> int:
-    """Phase 1 stub: would PUT the bytes to R2 with bandwidth throttling.
-    Phase 1.5 swaps to httpx.put with chunked upload + sleep-throttle.
-    Returns the bytes uploaded on success."""
-    raise UploadStub(
-        f"contribution worker not yet deployed; would PUT {len(file_bytes)} bytes "
-        f"to {signed_url} at max {max_mbps} MB/s"
-    )
+def _safe_json(response: Any) -> dict[str, Any]:
+    try:
+        return response.json()
+    except Exception:  # noqa: BLE001
+        return {"raw": response.text[:500]}
 
 
 # ── The uploader (Phase 1: dry-run by default; live mode flagged on) ───────────
@@ -256,7 +377,8 @@ class Uploader:
 
     __slots__ = (
         "_queue_dir", "_uploaded_dir", "_rejected_dir",
-        "_contributor_id", "_live", "_max_mbps",
+        "_contributor_id", "_tier", "_opted_in_at", "_privacy_mode",
+        "_live", "_max_mbps",
         "_thread", "_stop_event", "_interval_s",
         "_last_outcome", "_lock",
     )
@@ -265,6 +387,9 @@ class Uploader:
         self,
         *,
         contributor_id: str,
+        tier: str = "free",
+        opted_in_at: str = "",
+        privacy_mode: str = "hash_only",
         queue_dir: str | Path = DEFAULT_QUEUE_DIR,
         uploaded_dir: str | Path = DEFAULT_UPLOADED_DIR,
         rejected_dir: str | Path = DEFAULT_REJECTED_DIR,
@@ -276,6 +401,9 @@ class Uploader:
         self._uploaded_dir = Path(uploaded_dir).expanduser()
         self._rejected_dir = Path(rejected_dir).expanduser()
         self._contributor_id = contributor_id
+        self._tier = tier
+        self._opted_in_at = opted_in_at
+        self._privacy_mode = privacy_mode
         self._live = bool(live)
         self._max_mbps = float(max_mbps) if max_mbps is not None else _max_mbps()
         self._thread: threading.Thread | None = None
@@ -331,25 +459,40 @@ class Uploader:
 
             # Build accepted-rows-only payload + try upload.
             accepted_bytes = self._build_payload(accepted)
+            episode_count = len(accepted)
             try:
                 if self._live:
-                    signed = _request_signed_url(
-                        contributor_id=self._contributor_id,
+                    bytes_up = self._upload_one(
                         file_name=jsonl_path.name,
-                    )
-                    bytes_up = _put_to_r2(
-                        signed_url=signed, file_bytes=accepted_bytes,
-                        max_mbps=self._max_mbps,
+                        file_bytes=accepted_bytes,
+                        episode_count=episode_count,
                     )
                     outcome.bytes_uploaded += bytes_up
                     outcome.files_uploaded += 1
                     self._archive_uploaded(jsonl_path)
                 else:
                     logger.info(
-                        "uploader.dry_run file=%s episodes=%d bytes=%d (worker not deployed)",
-                        jsonl_path.name, len(accepted), len(accepted_bytes),
+                        "uploader.dry_run file=%s episodes=%d bytes=%d (live=False)",
+                        jsonl_path.name, episode_count, len(accepted_bytes),
                     )
                     outcome.files_kept_in_queue += 1
+            except RateLimited as exc:
+                logger.warning(
+                    "uploader.rate_limited file=%s — retrying next pass: %s",
+                    jsonl_path.name, exc,
+                )
+                outcome.files_kept_in_queue += 1
+            except ContributorRevoked as exc:
+                logger.error(
+                    "uploader.contributor_revoked file=%s — stopping uploader: %s",
+                    jsonl_path.name, exc,
+                )
+                outcome.errors.append(f"contributor_revoked: {exc}")
+                outcome.files_kept_in_queue += 1
+                # The worker says we're revoked; further attempts are pointless
+                # this pass. Operator should `reflex contribute --opt-out` to
+                # clear the local receipt.
+                break
             except UploadStub as exc:
                 logger.info("uploader.stub %s file=%s", exc, jsonl_path.name)
                 outcome.files_kept_in_queue += 1
@@ -401,6 +544,35 @@ class Uploader:
             except Exception as exc:  # noqa: BLE001
                 logger.error("uploader.run_failed %s", exc)
 
+    def _upload_one(
+        self,
+        *,
+        file_name: str,
+        file_bytes: bytes,
+        episode_count: int,
+    ) -> int:
+        """3-step worker round-trip: sign → put → complete. Returns bytes uploaded."""
+        sign_resp = _request_signed_url(
+            contributor_id=self._contributor_id,
+            tier=self._tier,
+            opted_in_at=self._opted_in_at,
+            file_name=file_name,
+            byte_size=len(file_bytes),
+            episode_count=episode_count,
+            privacy_mode=self._privacy_mode,
+        )
+        put_url = sign_resp["put_url"]
+        upload_id = sign_resp["upload_id"]
+        bytes_up = _put_bytes(
+            put_url=put_url, file_bytes=file_bytes, max_mbps=self._max_mbps,
+        )
+        _complete_upload(upload_id=upload_id, episode_count=episode_count)
+        logger.info(
+            "uploader.uploaded file=%s upload_id=%s bytes=%d",
+            file_name, upload_id, bytes_up,
+        )
+        return bytes_up
+
     def _group_by_episode(self, path: Path) -> dict[str, list[dict[str, Any]]]:
         out: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in _iter_jsonl_rows(path):
@@ -441,13 +613,18 @@ __all__ = [
     "DEFAULT_REJECTED_DIR",
     "DEFAULT_DAILY_INTERVAL_S",
     "DEFAULT_MAX_MBPS",
+    "DEFAULT_WORKER_URL",
+    "WORKER_URL_ENV",
     "MIN_EPISODE_STEPS",
     "MAX_ZERO_ACTION_FRAC",
     "MAX_DUP_IMAGE_HASH_FRAC",
     "MAX_ACTION_Z_SCORE",
+    "ContributorRevoked",
     "EpisodeStats",
+    "RateLimited",
     "UploadOutcome",
     "UploadStub",
     "Uploader",
+    "WorkerError",
     "filter_episodes",
 ]

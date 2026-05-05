@@ -7,7 +7,7 @@ compatibility_date = "2026-05-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "reflex-contributions"
-database_id = "REPLACE_AFTER_CREATE"
+database_id = "39cc37c0-524c-4a7a-921e-76cc44cb1494"
 
 # R2 binding for the actual contribution payloads. Bucket created via
 # `wrangler r2 bucket create reflex-curate`. Layout per spec:
