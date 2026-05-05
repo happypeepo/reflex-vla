@@ -62,6 +62,14 @@ DEFAULT_WORKER_URL = "https://reflex-contributions.fastcrest.workers.dev"
 WORKER_URL_ENV = "REFLEX_CONTRIB_ENDPOINT"
 HTTP_TIMEOUT_S = 30.0
 
+# Retry policy for transient errors. Don't retry on 403 (revoke), 410 (expired),
+# 412 (precondition failed), or 400 (bad request) — those are terminal. DO retry
+# on httpx connect/timeout errors, 502/503/504, and 500s.
+MAX_RETRIES = 2  # Initial attempt + 2 retries = 3 total tries
+BACKOFF_BASE_S = 2.0  # First retry waits 2s, second waits 4s
+RETRY_STATUS_CODES = frozenset({500, 502, 503, 504})
+TERMINAL_STATUS_CODES = frozenset({400, 403, 410, 412})
+
 
 def _worker_url() -> str:
     return os.environ.get(WORKER_URL_ENV, DEFAULT_WORKER_URL).rstrip("/")
@@ -271,7 +279,8 @@ def _request_signed_url(
 ) -> dict[str, Any]:
     """POST /v1/uploads/sign. Returns the worker's response dict
     {upload_id, r2_key, put_url, expires_at}. Raises RateLimited on 429,
-    ContributorRevoked on 403, WorkerError on other non-2xx."""
+    ContributorRevoked on 403 contributor_revoked, WorkerError on other
+    non-2xx after retry exhaustion."""
     try:
         import httpx
     except ImportError as exc:
@@ -287,73 +296,149 @@ def _request_signed_url(
         "episode_count": int(episode_count),
         "privacy_mode": privacy_mode,
     }
-    r = httpx.post(url, json=payload, timeout=HTTP_TIMEOUT_S)
-    if r.status_code == 429:
-        raise RateLimited(r.text)
-    if r.status_code == 403:
-        body = _safe_json(r)
-        if body.get("error") == "contributor_revoked":
-            raise ContributorRevoked(str(body))
-        raise WorkerError(r.status_code, body)
-    if r.status_code != 200:
+    last_exc: Exception | None = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            r = httpx.post(url, json=payload, timeout=HTTP_TIMEOUT_S)
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as exc:
+            last_exc = exc
+            if attempt < MAX_RETRIES:
+                wait = BACKOFF_BASE_S * (2 ** attempt)
+                logger.warning("uploader.sign_retrying attempt=%d wait=%.1fs err=%s", attempt + 1, wait, exc)
+                time.sleep(wait)
+                continue
+            raise WorkerError(0, {"error": "transport", "message": str(exc)}) from exc
+
+        if r.status_code == 200:
+            return r.json()
+        if r.status_code == 429:
+            raise RateLimited(r.text)
+        if r.status_code == 403:
+            body = _safe_json(r)
+            if body.get("error") == "contributor_revoked":
+                raise ContributorRevoked(str(body))
+            raise WorkerError(r.status_code, body)
+        if r.status_code in TERMINAL_STATUS_CODES:
+            raise WorkerError(r.status_code, _safe_json(r))
+        if r.status_code in RETRY_STATUS_CODES and attempt < MAX_RETRIES:
+            wait = BACKOFF_BASE_S * (2 ** attempt)
+            logger.warning(
+                "uploader.sign_retrying attempt=%d wait=%.1fs status=%d",
+                attempt + 1, wait, r.status_code,
+            )
+            time.sleep(wait)
+            continue
         raise WorkerError(r.status_code, _safe_json(r))
-    return r.json()
+    if last_exc is not None:
+        raise WorkerError(0, {"error": "transport", "message": str(last_exc)}) from last_exc
+    raise WorkerError(0, {"error": "exhausted_without_response"})
 
 
 def _put_bytes(*, put_url: str, file_bytes: bytes, max_mbps: float) -> int:
     """PUT the raw bytes to the worker's /v1/uploads/put/<id> endpoint.
     Throttles to `max_mbps` by chunked sends with sleep gating between chunks.
-    Returns bytes uploaded on success."""
+    Returns bytes uploaded on success.
+
+    Retry policy: transient transport errors + 5xx retry up to MAX_RETRIES
+    with exponential backoff. The R2 PUT is idempotent for the same upload_id
+    so re-PUT on retry overwrites any partial bytes from the previous attempt.
+    """
     try:
         import httpx
     except ImportError as exc:
         raise UploadStub(f"httpx not available: {exc}") from exc
 
     headers = {"Content-Type": "application/x-jsonlines"}
-    if max_mbps <= 0:
-        # No throttle — single shot.
-        r = httpx.put(put_url, content=file_bytes, headers=headers, timeout=HTTP_TIMEOUT_S * 4)
-    else:
-        # Chunked send with sleep throttle. Chunk size targets ~250ms of bandwidth.
-        chunk_bytes = max(64 * 1024, int(max_mbps * 1024 * 1024 * 0.25))
+    last_exc: Exception | None = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            if max_mbps <= 0:
+                r = httpx.put(put_url, content=file_bytes, headers=headers, timeout=HTTP_TIMEOUT_S * 4)
+            else:
+                chunk_bytes = max(64 * 1024, int(max_mbps * 1024 * 1024 * 0.25))
 
-        def _chunked() -> Any:
-            for i in range(0, len(file_bytes), chunk_bytes):
-                yield file_bytes[i : i + chunk_bytes]
-                time.sleep(0.25)
+                def _chunked() -> Any:
+                    for i in range(0, len(file_bytes), chunk_bytes):
+                        yield file_bytes[i : i + chunk_bytes]
+                        time.sleep(0.25)
 
-        r = httpx.put(
-            put_url, content=_chunked(), headers=headers,
-            timeout=HTTP_TIMEOUT_S * 4,
-        )
-    if r.status_code == 410:
-        raise WorkerError(r.status_code, _safe_json(r))  # URL expired
-    if r.status_code == 403:
-        body = _safe_json(r)
-        if body.get("error") == "contributor_revoked_between_sign_and_put":
-            raise ContributorRevoked(str(body))
-        raise WorkerError(r.status_code, body)
-    if r.status_code != 200:
+                r = httpx.put(
+                    put_url, content=_chunked(), headers=headers,
+                    timeout=HTTP_TIMEOUT_S * 4,
+                )
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as exc:
+            last_exc = exc
+            if attempt < MAX_RETRIES:
+                wait = BACKOFF_BASE_S * (2 ** attempt)
+                logger.warning("uploader.put_retrying attempt=%d wait=%.1fs err=%s", attempt + 1, wait, exc)
+                time.sleep(wait)
+                continue
+            raise WorkerError(0, {"error": "transport", "message": str(exc)}) from exc
+
+        if r.status_code == 200:
+            body = r.json()
+            return int(body.get("bytes_received", len(file_bytes)))
+        if r.status_code == 410:
+            raise WorkerError(r.status_code, _safe_json(r))  # URL expired — terminal
+        if r.status_code == 403:
+            body = _safe_json(r)
+            if body.get("error") == "contributor_revoked_between_sign_and_put":
+                raise ContributorRevoked(str(body))
+            raise WorkerError(r.status_code, body)
+        if r.status_code in TERMINAL_STATUS_CODES:
+            raise WorkerError(r.status_code, _safe_json(r))
+        if r.status_code in RETRY_STATUS_CODES and attempt < MAX_RETRIES:
+            wait = BACKOFF_BASE_S * (2 ** attempt)
+            logger.warning(
+                "uploader.put_retrying attempt=%d wait=%.1fs status=%d",
+                attempt + 1, wait, r.status_code,
+            )
+            time.sleep(wait)
+            continue
         raise WorkerError(r.status_code, _safe_json(r))
-    body = r.json()
-    return int(body.get("bytes_received", len(file_bytes)))
+    if last_exc is not None:
+        raise WorkerError(0, {"error": "transport", "message": str(last_exc)}) from last_exc
+    raise WorkerError(0, {"error": "exhausted_without_response"})
 
 
 def _complete_upload(*, upload_id: str, episode_count: int) -> dict[str, Any]:
-    """POST /v1/uploads/complete. Returns the worker's response."""
+    """POST /v1/uploads/complete. Retries on transient errors + 5xx."""
     try:
         import httpx
     except ImportError as exc:
         raise UploadStub(f"httpx not available: {exc}") from exc
 
     url = f"{_worker_url()}/v1/uploads/complete"
-    r = httpx.post(
-        url, json={"upload_id": upload_id, "episode_count": int(episode_count)},
-        timeout=HTTP_TIMEOUT_S,
-    )
-    if r.status_code != 200:
+    payload = {"upload_id": upload_id, "episode_count": int(episode_count)}
+    last_exc: Exception | None = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            r = httpx.post(url, json=payload, timeout=HTTP_TIMEOUT_S)
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as exc:
+            last_exc = exc
+            if attempt < MAX_RETRIES:
+                wait = BACKOFF_BASE_S * (2 ** attempt)
+                logger.warning("uploader.complete_retrying attempt=%d wait=%.1fs err=%s", attempt + 1, wait, exc)
+                time.sleep(wait)
+                continue
+            raise WorkerError(0, {"error": "transport", "message": str(exc)}) from exc
+
+        if r.status_code == 200:
+            return r.json()
+        if r.status_code in TERMINAL_STATUS_CODES:
+            raise WorkerError(r.status_code, _safe_json(r))
+        if r.status_code in RETRY_STATUS_CODES and attempt < MAX_RETRIES:
+            wait = BACKOFF_BASE_S * (2 ** attempt)
+            logger.warning(
+                "uploader.complete_retrying attempt=%d wait=%.1fs status=%d",
+                attempt + 1, wait, r.status_code,
+            )
+            time.sleep(wait)
+            continue
         raise WorkerError(r.status_code, _safe_json(r))
-    return r.json()
+    if last_exc is not None:
+        raise WorkerError(0, {"error": "transport", "message": str(last_exc)}) from last_exc
+    raise WorkerError(0, {"error": "exhausted_without_response"})
 
 
 def _safe_json(response: Any) -> dict[str, Any]:
@@ -456,6 +541,25 @@ class Uploader:
                 self._archive_rejected(jsonl_path)
                 outcome.files_kept_in_queue += 0
                 continue
+
+            # Compute per-episode quality scores + stamp onto rows before upload.
+            try:
+                from reflex.curate.quality import quality_from_jsonl_rows
+                for episode_id, episode_rows in accepted.items():
+                    qresult = quality_from_jsonl_rows(episode_rows)
+                    quality_payload = qresult.to_dict()
+                    for r in episode_rows:
+                        md = r.setdefault("metadata", {}) or {}
+                        md["quality_score"] = quality_payload["quality_score"]
+                        md["quality_components"] = quality_payload["quality_components"]
+                        md["quality_version"] = quality_payload["quality_version"]
+                    logger.info(
+                        "uploader.quality file=%s episode=%s score=%.3f components=%s",
+                        jsonl_path.name, episode_id, qresult.quality_score,
+                        {k: round(v, 3) for k, v in qresult.components.items()},
+                    )
+            except Exception as exc:  # noqa: BLE001 — quality scoring never blocks upload
+                logger.warning("uploader.quality_scoring_failed file=%s: %s", jsonl_path.name, exc)
 
             # Build accepted-rows-only payload + try upload.
             accepted_bytes = self._build_payload(accepted)

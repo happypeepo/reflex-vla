@@ -2872,6 +2872,45 @@ def doctor(
     except Exception as _curate_exc:  # noqa: BLE001
         add("Data contribution", False, f"unavailable: {_curate_exc}")
 
+    # Curate queue disk usage. Warns when queue exceeds 500 MB
+    # (signals stuck uploads or disk-fill protection nearing the 1 GB limit).
+    try:
+        from reflex.curate.uploader import (
+            DEFAULT_QUEUE_DIR as _Q,
+            DEFAULT_REJECTED_DIR as _R,
+            DEFAULT_UPLOADED_DIR as _U,
+        )
+        _q_path = Path(_Q).expanduser()
+        _r_path = Path(_R).expanduser()
+        _u_path = Path(_U).expanduser()
+
+        def _bytes_under(p: Path) -> tuple[int, int]:
+            if not p.exists():
+                return 0, 0
+            n = 0
+            total = 0
+            for f in p.glob("*.jsonl"):
+                n += 1
+                try:
+                    total += f.stat().st_size
+                except OSError:
+                    continue
+            return n, total
+
+        _qn, _qb = _bytes_under(_q_path)
+        _un, _ub = _bytes_under(_u_path)
+        _rn, _rb = _bytes_under(_r_path)
+        _q_mb = _qb / (1024 * 1024)
+        _detail = (
+            f"queue {_qn} files / {_qb / (1024 * 1024):.1f} MB · "
+            f"uploaded {_un} / {_ub / (1024 * 1024):.1f} MB · "
+            f"rejected {_rn} / {_rb / (1024 * 1024):.1f} MB"
+        )
+        # 500 MB warning threshold (1 GB hard limit per FreeContributorCollector spec).
+        add("Contribute queue", _q_mb < 500, _detail)
+    except Exception as _q_exc:  # noqa: BLE001
+        add("Contribute queue", False, f"unavailable: {_q_exc}")
+
     console.print(table)
     console.print(
         "\n[dim]If something here is unexpected, see "
