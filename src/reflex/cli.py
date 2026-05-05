@@ -2864,6 +2864,14 @@ def doctor(
     except Exception as e:
         add("reflex-vla", False, str(e))
 
+    # Curate data-contribution status (informational; no pass/fail).
+    try:
+        from reflex.curate import nudge_engine as _curate_nudge
+        _status_line = _curate_nudge.doctor_status()
+        add("Data contribution", True, _status_line)
+    except Exception as _curate_exc:  # noqa: BLE001
+        add("Data contribution", False, f"unavailable: {_curate_exc}")
+
     console.print(table)
     console.print(
         "\n[dim]If something here is unexpected, see "

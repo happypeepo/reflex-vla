@@ -1444,6 +1444,25 @@ def create_app(
             _model_type = _monolithic_cfg.get("model_type", "smolvla")
             _export_kind = _monolithic_cfg.get("export_kind", "decomposed")
             _ec = embodiment_config
+            # Curate dual-write: when --record AND consent is opted-in,
+            # also enqueue every recorded /act into the contribution queue
+            # at ~/.reflex/contribute/queue/. Failures here downgrade the
+            # recorder to JSONL-only — never block --record.
+            _curate_collector = None
+            try:
+                from reflex.curate import consent as _curate_consent
+                if _curate_consent.is_opted_in():
+                    from reflex.curate.free_collector import FreeContributorCollector
+                    _curate_collector = FreeContributorCollector.from_consent()
+                    logger.info(
+                        "curate dual-write armed: contributor_id=%s tier=%s",
+                        _curate_collector.contributor_id, _curate_collector.tier,
+                    )
+            except Exception as _curate_exc:  # noqa: BLE001
+                logger.warning(
+                    "curate dual-write disabled: %s", _curate_exc,
+                )
+                _curate_collector = None
             server._recorder = RecordWriter(  # type: ignore[attr-defined]
                 record_dir=record_dir,
                 model_hash=compute_model_hash(export_dir),
@@ -1459,10 +1478,12 @@ def create_app(
                 image_redaction=record_image_redaction,  # type: ignore[arg-type]
                 gzip_output=record_gzip,
                 reflex_version=_REFLEX_VERSION,
+                curate_collector=_curate_collector,
             )
             logger.info(
-                "RecordWriter armed: dir=%s redaction=%s gzip=%s",
+                "RecordWriter armed: dir=%s redaction=%s gzip=%s curate=%s",
                 record_dir, record_image_redaction, record_gzip,
+                "on" if _curate_collector else "off",
             )
         except Exception as e:  # noqa: BLE001 — recorder must never crash serve startup
             logger.error("RecordWriter init failed (recording disabled): %s", e)
@@ -1709,6 +1730,16 @@ def create_app(
                 ec.control["frequency_hz"], ec.control["chunk_size"],
             )
         server.health_state = "loading"  # type: ignore[attr-defined]
+        # Curate touchpoint: brief banner at serve start until the user has
+        # decided about data contribution. Honors REFLEX_NO_CONTRIB_NUDGE=1
+        # for hard-silence; otherwise prints once per serve start.
+        try:
+            from reflex.curate import nudge_engine as _curate_nudge
+            _msg = _curate_nudge.maybe_serve_start_banner()
+            if _msg is not None:
+                logger.info("contribute: %s", _msg.body)
+        except Exception as _curate_exc:  # noqa: BLE001
+            logger.debug("curate banner skipped: %s", _curate_exc)
         # Phase logging + loud failure: if server.load() throws, print a
         # full traceback to stderr (uvicorn swallows lifespan exceptions
         # by default, leaving users staring at "Waiting for application

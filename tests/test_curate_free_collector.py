@@ -136,3 +136,91 @@ def test_from_consent_raises_when_not_opted_in(tmp_path: Path) -> None:
             consent_path=consent_path,
             data_dir=queue_dir,
         )
+
+
+# ── Dual-write integration with RecordWriter ─────────────────────────────────
+
+
+def test_record_writer_dual_writes_to_curate_queue(tmp_path: Path) -> None:
+    """RecordWriter with attached collector writes to BOTH JSONL trace and
+    curate queue. Failures in the collector path never break the JSONL path."""
+    from reflex.runtime.record import RecordWriter
+
+    queue_dir = tmp_path / "queue"
+    traces_dir = tmp_path / "traces"
+    collector = FreeContributorCollector(
+        contributor_id="free_dual_write_test",
+        data_dir=queue_dir,
+    )
+    rec = RecordWriter(
+        record_dir=traces_dir,
+        model_hash="aaaa",
+        config_hash="bbbb",
+        export_dir=tmp_path,
+        model_type="pi0.5",
+        export_kind="monolithic",
+        providers=["CPUExecutionProvider"],
+        gzip_output=False,
+        curate_collector=collector,
+    )
+    seq = rec.write_request(
+        chunk_id=0,
+        image_b64=None,
+        instruction="pick up the block",
+        state=[0.1, 0.2, 0.3],
+        actions=[[0.4, 0.5, 0.6]] * 5,
+        action_dim=3,
+        latency_total_ms=12.3,
+    )
+    assert seq == 0
+    rec.close()
+
+    # JSONL trace exists
+    trace_files = list(traces_dir.glob("*.jsonl"))
+    assert len(trace_files) == 1
+    # Curate queue exists with contributor_id tag
+    queue_files = list(queue_dir.glob("*.jsonl"))
+    assert len(queue_files) == 1
+    queue_content = queue_files[0].read_text()
+    assert "free_dual_write_test" in queue_content
+    assert "contributor_id" in queue_content
+
+
+def test_record_writer_jsonl_resilient_to_collector_failure(tmp_path: Path) -> None:
+    """If the curate collector fails to start, the JSONL trace still works."""
+    from reflex.runtime.record import RecordWriter
+
+    class _BrokenCollector:
+        is_running = False
+        def start(self):
+            raise RuntimeError("simulated collector failure")
+        def record(self, event):
+            raise AssertionError("should not be called when start failed")
+        def stop(self):
+            pass
+
+    traces_dir = tmp_path / "traces"
+    rec = RecordWriter(
+        record_dir=traces_dir,
+        model_hash="aaaa",
+        config_hash="bbbb",
+        export_dir=tmp_path,
+        model_type="pi0.5",
+        export_kind="monolithic",
+        providers=["CPUExecutionProvider"],
+        gzip_output=False,
+        curate_collector=_BrokenCollector(),
+    )
+    rec.write_request(
+        chunk_id=0,
+        image_b64=None,
+        instruction="x",
+        state=[0.1],
+        actions=[[0.2]],
+        action_dim=1,
+        latency_total_ms=1.0,
+    )
+    rec.close()
+    trace_files = list(traces_dir.glob("*.jsonl"))
+    assert len(trace_files) == 1
+    assert "x" in trace_files[0].read_text()
