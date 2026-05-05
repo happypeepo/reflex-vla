@@ -3831,6 +3831,13 @@ config_app = typer.Typer(name="config", help="Show + manage reflex configuration
 app.add_typer(config_app, name="config")
 
 
+# ─── reflex contribute {opt-in,opt-out,revoke,status,info} ──────────────────
+# Curate wedge data-contribution program. Implementation lives in
+# src/reflex/curate/opt_in_cli.py; this is the wiring.
+from reflex.curate.opt_in_cli import contribute_app  # noqa: E402
+app.add_typer(contribute_app, name="contribute")
+
+
 @app.command()
 def status() -> None:
     """List running reflex serve processes (PID, port, command)."""
