@@ -3885,6 +3885,115 @@ from reflex.curate.opt_in_cli import contribute_app  # noqa: E402
 app.add_typer(contribute_app, name="contribute")
 
 
+# ─── reflex curate {convert} ─────────────────────────────────────────────────
+# Curate dataset-conversion subcommand. `reflex curate convert <input> --format X`
+curate_app = typer.Typer(
+    name="curate",
+    help="Reflex Curate — convert recorded traces to published dataset formats.",
+    no_args_is_help=True,
+)
+app.add_typer(curate_app, name="curate")
+
+
+@curate_app.command("convert")
+def curate_convert(
+    input_jsonl: str = typer.Argument(
+        ..., help="Path to a JSONL trace file or directory of JSONL files.",
+    ),
+    format: str = typer.Option(
+        ..., "--format", "-f",
+        help="Target format: lerobot-v3 | hdf5 | rlds | openx-embodiment",
+    ),
+    output: str = typer.Option(
+        ..., "--output", "-o",
+        help="Output directory for the converted dataset.",
+    ),
+    min_quality: Optional[float] = typer.Option(
+        None, "--min-quality",
+        help="Drop episodes with quality_score below this threshold.",
+    ),
+    canonical_only: bool = typer.Option(
+        False, "--canonical-only",
+        help="Drop non-canonical episodes (dedup cluster non-canonicals filtered out).",
+    ),
+    robot_type: str = typer.Option(
+        "unknown", "--robot-type",
+        help="Embodiment slug (franka / so100 / ur5 / aloha / ...). Used by lerobot-v3 + openx-embodiment.",
+    ),
+    fps: int = typer.Option(
+        30, "--fps",
+        help="Target frame rate for the dataset (used by lerobot-v3).",
+    ),
+) -> None:
+    """Convert Reflex JSONL traces to a published dataset format."""
+    import json as _json
+    from reflex.curate.format_converters import (
+        CONVERTER_REGISTRY,
+        HDF5Converter,
+        LeRobotV3Converter,
+        OpenXEmbodimentConverter,
+        RLDSConverter,
+    )
+
+    if format not in CONVERTER_REGISTRY:
+        console.print(
+            f"[red]Unknown format[/red] [cyan]{format}[/cyan]; available: "
+            f"[cyan]{', '.join(sorted(CONVERTER_REGISTRY.keys()))}[/cyan]"
+        )
+        raise typer.Exit(2)
+
+    try:
+        if format == "lerobot-v3":
+            converter = LeRobotV3Converter(robot_type=robot_type, fps=fps)
+        elif format == "hdf5":
+            converter = HDF5Converter()
+        elif format == "openx-embodiment":
+            converter = OpenXEmbodimentConverter(embodiment=robot_type)
+        else:
+            converter = CONVERTER_REGISTRY[format]()
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Failed to construct converter:[/red] {exc}")
+        raise typer.Exit(2)
+
+    try:
+        result = converter.convert(
+            input_jsonl=input_jsonl,
+            output_dir=output,
+            min_quality=min_quality,
+            canonical_only=canonical_only,
+        )
+    except ImportError as exc:
+        console.print(f"[red]Missing dependency:[/red] {exc}")
+        raise typer.Exit(3)
+    except NotImplementedError as exc:
+        console.print(f"[yellow]Not yet implemented:[/yellow] {exc}")
+        raise typer.Exit(4)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Conversion failed:[/red] {exc}")
+        raise typer.Exit(5)
+
+    # Render summary table
+    table = Table(title=f"Conversion: {format} → {output}")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value")
+    table.add_row("Format", format)
+    table.add_row("Episodes", str(result.episode_count))
+    table.add_row("Steps", str(result.step_count))
+    table.add_row("Bytes written", f"{result.bytes_written:,}")
+    table.add_row("Skipped", str(result.skipped_episodes))
+    if result.skipped_reasons:
+        table.add_row(
+            "Skip reasons",
+            ", ".join(f"{k}={v}" for k, v in result.skipped_reasons.items()),
+        )
+    console.print(table)
+
+    if result.warnings:
+        console.print("[yellow]Warnings:[/yellow]")
+        for w in result.warnings:
+            console.print(f"  - {w}")
+
+
 @app.command()
 def status() -> None:
     """List running reflex serve processes (PID, port, command)."""
