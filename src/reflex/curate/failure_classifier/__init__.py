@@ -14,11 +14,13 @@ Franka").
     action_clamp          — output saturation events / clamp ratio high
     gripper_jam           — gripper position oscillating
 
-Per the research sidecar (Lens 3 finding F3.1): ActionGuard signals are
-not yet plumbed into the recorder. Detectors that depend on guard data
-(collision, action_clamp, gripper_jam-secondary) degrade gracefully —
-emit confidence=0.0 with evidence='action_guard_data_unavailable' when
-the guard field is absent.
+ActionGuard substrate (per Lens 3 Finding 3.1): the recorder now passes a
+`guard_summary` dict to write_request when the server has an ActionGuard
+configured (see `runtime/server.py` predict() + lifespan write_request
+call site). When the guard field is still absent (no URDF / embodiment_
+config.constraints absent), detectors that depend on guard data (collision,
+action_clamp) degrade gracefully — confidence=0.0 with evidence=
+'action_guard_data_unavailable'.
 
 Submodules:
     modes      — per-mode detector functions

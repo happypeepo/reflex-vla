@@ -792,6 +792,7 @@ class ReflexServer:
         # reflex guard — safety check
         safety_violations = 0
         guard_detail: list[str] = []
+        guard_summary: dict[str, Any] | None = None
         if self._action_guard is not None:
             try:
                 safe_actions, guard_results = self._action_guard.check(actions_np)
@@ -802,6 +803,18 @@ class ReflexServer:
                         f"action {i}: {len(r.violations)} violations"
                         for i, r in enumerate(guard_results[:3]) if r.violations
                     ]
+                # Failure-classifier substrate (per consent-revoke + failure-classifier
+                # research sidecars): expose flat violations list + clamp count so the
+                # recorder can write it into the JSONL `guard` field. Detectors that
+                # depend on guard data (collision, action_clamp) read this in the
+                # uploader pass.
+                guard_summary = {
+                    "violations": [
+                        v for r in guard_results for v in r.violations
+                    ],
+                    "clamped": any(r.clamped for r in guard_results),
+                    "clamp_count": sum(1 for r in guard_results if r.clamped),
+                }
             except Exception as e:
                 logger.warning("safety check failed: %s", e)
 
@@ -858,6 +871,11 @@ class ReflexServer:
             result["safety_violations"] = safety_violations
             if guard_detail:
                 result["safety_detail"] = guard_detail
+            # Recorder consumes guard_summary to populate write_request(guard=...)
+            # for the failure classifier. Only emit when there's actual data
+            # (omit when guard_summary remained None due to exception above).
+            if guard_summary is not None:
+                result["guard_summary"] = guard_summary
         if self._deadline_ms is not None:
             result["deadline_exceeded"] = deadline_exceeded
             if self._deadline_misses:
@@ -2549,6 +2567,13 @@ def create_app(
                         "cached": _two_routing_decision.cached,
                         "crash_verdict": _two_routing_decision.crash_verdict,
                     }
+                # Failure-classifier substrate (per failure-classifier-v1 research
+                # sidecar Finding 3.1): pass through guard_summary if predict()
+                # populated it. None when ActionGuard wasn't built (no URDF /
+                # embodiment_config.constraints absent).
+                _guard_for_record = (
+                    result.get("guard_summary") if isinstance(result, dict) else None
+                )
                 rec_seq = _rec.write_request(
                     chunk_id=_rec.seq,  # 1:1 with seq for non-batched serve
                     image_b64=request.image,
@@ -2560,6 +2585,7 @@ def create_app(
                     mode=str(result.get("inference_mode", "")),
                     error=err,
                     routing=_routing_for_record,
+                    guard=_guard_for_record,
                 )
                 if rec_seq >= 0:
                     span.set_attribute("reflex.record.seq", rec_seq)

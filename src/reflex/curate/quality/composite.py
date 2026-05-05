@@ -216,8 +216,11 @@ def quality_from_jsonl_rows(
     actions_arr = np.asarray(flat_actions, dtype=np.float32)
     chunk_ids_arr = np.asarray(flat_chunks, dtype=np.int32)
 
-    # Best-effort context extraction. Recorder will tag these in Phase 1.5
-    # (see free_collector.py wire-up in this same change).
+    # Best-effort context extraction. When the recorder hasn't tagged these
+    # (typical for fresh JSONL streams without per-embodiment metadata
+    # injection — see free_collector.py), we fall back to defaults. The
+    # quality scorer ranks correctly even with embodiment="*" + execute_hz
+    # 50.0 — they widen the per-embodiment thresholds, not break them.
     md0 = rows[0].get("metadata", {}) or {}
     embodiment = str(md0.get("embodiment", "*"))
     task = str(md0.get("task", "*"))

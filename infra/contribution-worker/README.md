@@ -6,7 +6,7 @@ stats, and revoke-cascade requests for the data contribution program.
 Sibling workers (each in its own folder under `infra/`):
 - `license-worker` — Pro license issuance + revocation (deployed)
 - `telemetry-worker` — opt-in telemetry (built, not yet deployed)
-- `contribution-worker` — this one (not yet deployed)
+- `contribution-worker` — this one (deployed at `https://reflex-contributions.fastcrest.workers.dev`)
 
 ## Endpoints
 

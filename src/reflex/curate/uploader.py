@@ -7,16 +7,17 @@ Per `data-collection-free-tier.md`:
 - Bandwidth-respecting: throttle to REFLEX_CONTRIB_MAX_MBPS (default 10 MB/s)
 - Set REFLEX_NO_CONTRIB_UPLOAD=1 to keep collecting locally without uploading
 
-Phase 1 scope: this module ships the queue-management + episode-quality-filter
-+ bandwidth-throttle skeleton, with the actual R2 PUT stubbed (the contribution
-worker has not been deployed yet — see infra/contribution-worker/, planned).
-Once the worker ships:
-    swap `_request_signed_url()` + `_put_to_r2()` to real httpx calls and the
-    uploader becomes live. No other call sites change.
+Live transport: 3-step round-trip (sign → put → complete) against the
+deployed contribution-worker at https://reflex-contributions.fastcrest
+.workers.dev. Override the endpoint with REFLEX_CONTRIB_ENDPOINT.
 
-Until then, the uploader runs `--dry-run` semantics by default: it scans, it
-filters, it logs what *would* upload, but it does not delete the local file.
-This keeps queued data safe across the launch transition.
+Defaults to `live=True` from the server lifespan; set REFLEX_CURATE_DRY_RUN=1
+to keep collecting locally without uploading. In dry-run mode the uploader
+scans + filters + logs what *would* upload but does not mutate the queue.
+
+Retry policy: transient transport errors + 5xx codes retry up to MAX_RETRIES
+times with exponential backoff (2s, 4s). Terminal codes (400 / 403 / 410 /
+412) skip retry. ContributorRevoked stops the pass.
 """
 from __future__ import annotations
 
@@ -448,16 +449,16 @@ def _safe_json(response: Any) -> dict[str, Any]:
         return {"raw": response.text[:500]}
 
 
-# ── The uploader (Phase 1: dry-run by default; live mode flagged on) ───────────
+# ── The uploader ──────────────────────────────────────────────────────────────
 
 
 class Uploader:
     """Cron-driven background uploader for the Curate queue.
 
-    Default mode is DRY-RUN — files are scanned, filtered, accepted/rejected
-    decisions are made and logged, but the local queue is NOT mutated. This
-    is Phase 1 behavior because the contribution worker hasn't been deployed
-    yet. Set `live=True` (Phase 1.5) to enable real R2 PUT + queue removal.
+    Pass `live=True` (default in server lifespan) to perform the real
+    sign + put + complete round-trip against the contribution worker. Pass
+    `live=False` (or set REFLEX_CURATE_DRY_RUN=1) to scan + filter + log
+    without mutating the queue — useful for inspection or offline replay.
     """
 
     __slots__ = (
