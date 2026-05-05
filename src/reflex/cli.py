@@ -3943,6 +3943,62 @@ def calibrate_so100_preflight(
     _sp.run(cmd, check=False)
 
 
+# ─── reflex bench-game <game> {collect, eval} ───────────────────────────────
+# Real-arm bench games. Vendored from auto_soarm (MIT) per ADR 2026-05-06.
+# Separate typer group from the existing `reflex bench` (hardware-level) so
+# the existing surface stays untouched.
+bench_game_app = typer.Typer(
+    name="bench-game",
+    help="Reflex bench games — real-arm regression-test rigs (tablet tap, etc.).",
+    no_args_is_help=True,
+)
+app.add_typer(bench_game_app, name="bench-game")
+
+circle_lr_app = typer.Typer(
+    name="circle_lr",
+    help="Canonical SO-ARM 100 + tablet circle-tap benchmark.",
+    no_args_is_help=True,
+)
+bench_game_app.add_typer(circle_lr_app, name="circle_lr")
+
+
+@circle_lr_app.command("collect")
+def bench_game_circle_lr_collect(
+    episodes: int = typer.Option(20, "--episodes", help="Number of episodes to collect."),
+) -> None:
+    """Collect a circle-tap dataset on real SO-ARM 100 + Android tablet."""
+    import subprocess as _sp
+    cmd = [
+        sys.executable, "-m", "reflex.bench.games.circle_lr.circle_collect",
+        "--episodes", str(episodes),
+    ]
+    _sp.run(cmd, check=False)
+
+
+@circle_lr_app.command("eval")
+def bench_game_circle_lr_eval(
+    ckpt: str = typer.Option(..., "--ckpt", help="Path to a trained ACT checkpoint."),
+    episodes: int = typer.Option(8, "--episodes", help="Number of eval episodes."),
+    remote_host: Optional[str] = typer.Option(
+        None, "--remote-host", help="Remote inference host (use with --remote-port).",
+    ),
+    remote_port: Optional[int] = typer.Option(
+        None, "--remote-port", help="Remote inference port.",
+    ),
+) -> None:
+    """Run the trained policy against the live tablet + score hits."""
+    import subprocess as _sp
+    cmd = [
+        sys.executable, "-m", "reflex.bench.games.circle_lr.circle_eval",
+        "--ckpt", ckpt, "--episodes", str(episodes),
+    ]
+    if remote_host:
+        cmd += ["--remote-host", remote_host]
+    if remote_port:
+        cmd += ["--remote-port", str(remote_port)]
+    _sp.run(cmd, check=False)
+
+
 # ─── reflex curate {convert} ─────────────────────────────────────────────────
 # Curate dataset-conversion subcommand. `reflex curate convert <input> --format X`
 curate_app = typer.Typer(
