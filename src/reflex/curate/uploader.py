@@ -561,6 +561,22 @@ class Uploader:
             except Exception as exc:  # noqa: BLE001 — quality scoring never blocks upload
                 logger.warning("uploader.quality_scoring_failed file=%s: %s", jsonl_path.name, exc)
 
+            # Episode-level dedup (within-file; cross-session dedup is Phase 1.5).
+            # Stamps cluster_id + is_canonical on each row's metadata. NEVER
+            # deletes data per the spec — flagging only.
+            try:
+                self._stamp_dedup(jsonl_path, accepted)
+            except Exception as exc:  # noqa: BLE001 — dedup never blocks upload
+                logger.warning("uploader.dedup_failed file=%s: %s", jsonl_path.name, exc)
+
+            # Auto-tag metadata (task type / subtype / difficulty / language /
+            # terminal gripper / action complexity). Stamps tags on each row's
+            # metadata. Powers Tier-2 filterable dataset queries.
+            try:
+                self._stamp_metadata(jsonl_path, accepted)
+            except Exception as exc:  # noqa: BLE001 — metadata enrichment never blocks upload
+                logger.warning("uploader.metadata_failed file=%s: %s", jsonl_path.name, exc)
+
             # Build accepted-rows-only payload + try upload.
             accepted_bytes = self._build_payload(accepted)
             episode_count = len(accepted)
@@ -647,6 +663,109 @@ class Uploader:
                 self.run_once()
             except Exception as exc:  # noqa: BLE001
                 logger.error("uploader.run_failed %s", exc)
+
+    def _stamp_dedup(
+        self,
+        jsonl_path: Path,
+        accepted: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        """Run the dedup pipeline on accepted episodes and stamp cluster_id +
+        is_canonical onto each row's metadata. Logs cluster summary."""
+        from reflex.curate.dedup import (
+            compute_average_hash,
+            dedup_episodes,
+        )
+
+        # Build the dedup input dict from accepted rows.
+        episodes_input: dict[str, dict[str, Any]] = {}
+        for episode_id, rows in accepted.items():
+            # Flatten action chunks → (T, action_dim) for trajectory similarity.
+            flat_actions: list[list[float]] = []
+            for r in rows:
+                chunk = r.get("action_chunk") or []
+                for action in chunk:
+                    if isinstance(action, list):
+                        flat_actions.append(action)
+            if not flat_actions:
+                continue
+            import numpy as np
+            actions_arr = np.asarray(flat_actions, dtype=np.float32)
+
+            # Try to compute phash from first row's image_b64. Falls back to
+            # trajectory-only when image_b64 is None / hash_only / unloadable.
+            phash: str | None = None
+            first_image = rows[0].get("image_b64")
+            if isinstance(first_image, str) and len(first_image) > 64:
+                # Heuristic: full-mode base64 image data is much longer than
+                # a 64-char SHA-256 hex (hash_only mode). Try to decode + hash.
+                try:
+                    import base64
+                    img_bytes = base64.b64decode(first_image, validate=False)
+                    phash = compute_average_hash(img_bytes)
+                except Exception:  # noqa: BLE001
+                    phash = None
+
+            md0 = rows[0].get("metadata", {}) or {}
+            quality_score_val = float(md0.get("quality_score") or 0.0)
+
+            episodes_input[episode_id] = {
+                "phash": phash,
+                "actions": actions_arr,
+                "quality_score": quality_score_val,
+                "step_count": int(actions_arr.shape[0]),
+                "first_seen_at": str(rows[0].get("timestamp") or ""),
+            }
+
+        if not episodes_input:
+            return
+
+        results = dedup_episodes(episodes_input)
+        for episode_id, info in results.items():
+            payload = info.to_dict()
+            for r in accepted.get(episode_id, []):
+                md = r.setdefault("metadata", {}) or {}
+                md.update(payload)
+
+        # Log cluster summary (only emit non-singleton clusters to keep logs tight).
+        non_singletons = [
+            (info.cluster_id, info.cluster_size)
+            for info in results.values()
+            if info.cluster_size > 1 and info.is_canonical
+        ]
+        if non_singletons:
+            logger.info(
+                "uploader.dedup file=%s clusters=%s",
+                jsonl_path.name, non_singletons,
+            )
+
+    def _stamp_metadata(
+        self,
+        jsonl_path: Path,
+        accepted: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        """Run auto-tagging on accepted episodes; stamp tag bundle onto each
+        row's metadata for Tier-2 filterable dataset construction."""
+        from reflex.curate.metadata import enrich_from_jsonl_rows
+
+        for episode_id, rows in accepted.items():
+            try:
+                result = enrich_from_jsonl_rows(rows)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("uploader.metadata_episode_failed episode=%s: %s", episode_id, exc)
+                continue
+            payload = result.to_dict()
+            for r in rows:
+                md = r.setdefault("metadata", {}) or {}
+                md["tags"] = payload["tags"]
+                md["taxonomy_version"] = payload["taxonomy_version"]
+            tags_summary = {
+                k: v.get("value") for k, v in payload["tags"].items()
+                if k in ("task_type", "task_subtype", "instruction_language", "difficulty")
+            }
+            logger.info(
+                "uploader.metadata file=%s episode=%s tags=%s",
+                jsonl_path.name, episode_id, tags_summary,
+            )
 
     def _upload_one(
         self,
