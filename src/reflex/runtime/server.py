@@ -1179,6 +1179,11 @@ def create_app(
     otel_sample: float = 1.0,  # 0.0-1.0; 1.0=sample all, 0.1=10% (OTel SemConv)
     robot_id: str | None = None,  # fleet-telemetry: human-readable per-process identity
     cuda_graphs_enabled: bool = False,  # opt-in ORT cuda-graphs on decomposed sessions
+    # Action-similarity fast path (FlashVLA, arxiv 2505.21200). Decomposed
+    # pi0.5 only — Pi05DecomposedServer wires it; legacy + monolithic ignore.
+    # 0.0 = disabled (default); 0.05 = paper default.
+    action_similarity_threshold: float = 0.0,
+    max_similar_skips: int = 3,
     a2c2_checkpoint: str | None = None,  # path to .npz A2C2 head; None disables A2C2
     a2c2_latency_threshold_ms: float = 40.0,  # hook auto-skip when latency_p95 < this (ms)
     a2c2_success_threshold: float = 0.90,  # hook auto-skip when /act success rate > this; set to 1.01 to disable
@@ -1299,6 +1304,8 @@ def create_app(
             deadline_ms=deadline_ms,
             max_batch=max_batch,
             batch_timeout_ms=batch_timeout_ms,
+            action_similarity_threshold=action_similarity_threshold,
+            max_similar_skips=max_similar_skips,
         )
     elif _monolithic_cfg.get("export_kind") == "monolithic":
         _model_type = _monolithic_cfg.get("model_type", "smolvla")

@@ -113,6 +113,17 @@ reflex_fallback_invocations_total = Counter(
     registry=REGISTRY,
 )
 
+# Action-similarity fast-path skip counter (action-similarity-fast-path
+# Phase 1.5 — FlashVLA). Increments when the inference path returns a
+# cached action chunk instead of running the expert. Operator visibility
+# on how often the fast path actually triggers (low rate = no real
+# benefit; high rate near 100% = threshold may be too lax → drift risk).
+reflex_action_skip_total = Counter(
+    "reflex_action_skip_total",
+    "Action-similarity fast path: cached-action returns instead of expert calls",
+    registry=REGISTRY,
+)
+
 reflex_model_swaps_total = Counter(
     "reflex_model_swaps_total",
     "Hot-swap events (recorded at swap-complete)",
@@ -215,6 +226,10 @@ def inc_fallback_invocation(embodiment: str, target: str) -> None:
     reflex_fallback_invocations_total.labels(
         embodiment=embodiment, fallback_target=target
     ).inc()
+
+
+def inc_action_skip() -> None:
+    reflex_action_skip_total.inc()
 
 
 def inc_model_swap(embodiment: str, from_model: str, to_model: str) -> None:

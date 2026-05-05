@@ -1649,6 +1649,26 @@ def serve(
              "overhead pattern). Default off — opt-in for Phase 1 per ADR "
              "2026-04-24-cuda-graphs-architecture.",
     ),
+    action_similarity_threshold: float = typer.Option(
+        0.0,
+        "--action-similarity-threshold",
+        help="Action-similarity fast path (FlashVLA, arxiv 2505.21200). When "
+             ">0, the inference path skips the expert + reuses the prior "
+             "action chunk if its L2 distance to the new chunk is below this "
+             "value. Paper default 0.05; 0.0 = disabled (default). Caps "
+             "consecutive skips via --max-similar-skips. Decomposed pi0.5 "
+             "only; ignored on monolithic exports. Per Phase 1.5 spec "
+             "features/01_serve/subfeatures/_perf_compound/"
+             "action-similarity-fast-path.",
+    ),
+    max_similar_skips: int = typer.Option(
+        3,
+        "--max-similar-skips",
+        help="Cap on consecutive cached-action returns from the action-"
+             "similarity fast path. Prevents drift on slow-changing scenes. "
+             "Paper default 3. Only used when --action-similarity-threshold "
+             ">0.",
+    ),
     policy_a: str = typer.Option(
         "", "--policy-a",
         help="2-policy A/B mode: path to policy A export. When set, --policy-b "
@@ -2018,6 +2038,8 @@ def serve(
         otel_sample=otel_sample,
         robot_id=robot_id or None,
         cuda_graphs_enabled=cuda_graphs,
+        action_similarity_threshold=action_similarity_threshold,
+        max_similar_skips=max_similar_skips,
         max_batch_cost_ms=max_batch_cost_ms,
         a2c2_checkpoint=a2c2_checkpoint or None,
         a2c2_latency_threshold_ms=a2c2_latency_threshold_ms,
@@ -2048,6 +2070,11 @@ def serve(
         composed.append(f"[cyan]robot[/cyan]={robot_id}")
     if cuda_graphs:
         composed.append("[cyan]cuda-graphs[/cyan]")
+    if action_similarity_threshold > 0:
+        composed.append(
+            f"[cyan]action-fast-path[/cyan]"
+            f"=L2<{action_similarity_threshold:g}/max-skip={max_similar_skips}"
+        )
     if a2c2_checkpoint:
         composed.append(f"[cyan]a2c2[/cyan]={Path(a2c2_checkpoint).name}")
     if auto_calibrate:
