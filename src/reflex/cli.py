@@ -3885,6 +3885,64 @@ from reflex.curate.opt_in_cli import contribute_app  # noqa: E402
 app.add_typer(contribute_app, name="contribute")
 
 
+# ─── reflex calibrate <embodiment> ───────────────────────────────────────────
+# Physical-arm calibration. SO-ARM 100 substrate vendored from auto_soarm
+# (MIT) per ADR 2026-05-06-vendor-auto-soarm.md. Other embodiments add their
+# own subcommand groups under this.
+calibrate_app = typer.Typer(
+    name="calibrate",
+    help="Calibrate a physical robot arm (joint zeroing + workspace bounds).",
+    no_args_is_help=True,
+)
+app.add_typer(calibrate_app, name="calibrate")
+
+so100_calibrate_app = typer.Typer(
+    name="so100",
+    help="SO-ARM 100 calibration (corners + surface + tap model).",
+    no_args_is_help=True,
+)
+calibrate_app.add_typer(so100_calibrate_app, name="so100")
+
+
+@so100_calibrate_app.command("corners")
+def calibrate_so100_corners() -> None:
+    """Hand-guide the arm to the 4 numbered tablet corners; record joint poses."""
+    import subprocess as _sp
+    from reflex.embodiments.so100.calibration import calibrate_corners as _mod
+    # The upstream module is invoked as a script. Re-exec via -m for now;
+    # Phase 1.5 can swap to in-process invocation when we audit the script's
+    # __main__ block for safe-as-library use.
+    _sp.run([sys.executable, "-m", "reflex.embodiments.so100.calibration.calibrate_corners"], check=False)
+
+
+@so100_calibrate_app.command("surface")
+def calibrate_so100_surface() -> None:
+    """Probe the tablet surface for tap depth; fit the tap model."""
+    import subprocess as _sp
+    _sp.run([sys.executable, "-m", "reflex.embodiments.so100.calibration.calibrate_surface"], check=False)
+
+
+@so100_calibrate_app.command("all")
+def calibrate_so100_all() -> None:
+    """Run the full SO-ARM 100 calibration sequence: corners → surface."""
+    import subprocess as _sp
+    _sp.run([sys.executable, "-m", "reflex.embodiments.so100.calibration.calibrate_all"], check=False)
+
+
+@so100_calibrate_app.command("preflight")
+def calibrate_so100_preflight(
+    skip_camera: bool = typer.Option(
+        False, "--skip-camera", help="Skip the camera-availability check.",
+    ),
+) -> None:
+    """Non-invasive checks: arm serial / motor IDs / camera / ADB tablet."""
+    import subprocess as _sp
+    cmd = [sys.executable, "-m", "reflex.embodiments.so100.calibration.preflight"]
+    if skip_camera:
+        cmd.append("--skip-camera")
+    _sp.run(cmd, check=False)
+
+
 # ─── reflex curate {convert} ─────────────────────────────────────────────────
 # Curate dataset-conversion subcommand. `reflex curate convert <input> --format X`
 curate_app = typer.Typer(
