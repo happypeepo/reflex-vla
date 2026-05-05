@@ -86,6 +86,10 @@ def main(
         "", "--purge",
         help="Remove a specific queued file by name (run --inspect first to see names).",
     ),
+    revoke_status: str = typer.Option(
+        "", "--revoke-status",
+        help="Check cascade progress for a revoke request_id (returned from --revoke).",
+    ),
     yes: bool = typer.Option(
         False, "--yes", "-y",
         help="Auto-confirm prompts (for --revoke / --purge). Required in non-interactive contexts.",
@@ -95,12 +99,12 @@ def main(
     if ctx.invoked_subcommand is not None:
         return
 
-    flags = [opt_in, opt_out, revoke, status, info, inspect, bool(purge)]
+    flags = [opt_in, opt_out, revoke, status, info, inspect, bool(purge), bool(revoke_status)]
     set_count = sum(1 for f in flags if f)
     if set_count > 1:
         console.print(
             "[red]Pick one of:[/red] --opt-in, --opt-out, --revoke, --status, "
-            "--info, --inspect, --purge"
+            "--info, --inspect, --purge, --revoke-status"
         )
         raise typer.Exit(2)
 
@@ -121,6 +125,9 @@ def main(
         return
     if purge:
         _cmd_purge(target=purge, yes=yes)
+        return
+    if revoke_status:
+        _cmd_revoke_status(request_id=revoke_status)
         return
     # No flag set OR --status set: show status
     _cmd_status()
@@ -252,6 +259,9 @@ def _cmd_revoke(*, yes: bool) -> None:
     console.print(messaging.revoke_success(contributor_id=contributor_id))
     if server_request_id:
         console.print(f"[dim]Server-side cascade request_id: {server_request_id}[/dim]")
+        console.print(
+            f"[dim]Track progress: [cyan]reflex contribute --revoke-status {server_request_id}[/cyan][/dim]"
+        )
     else:
         console.print(
             "[yellow]⚠[/yellow]  Could not reach the contribution worker — local "
@@ -432,6 +442,81 @@ def _cmd_purge(*, target: str, yes: bool) -> None:
 
     target_path.unlink()
     console.print(f"[green]✓[/green] Removed [cyan]{target_path}[/cyan].")
+
+
+def _cmd_revoke_status(*, request_id: str) -> None:
+    """Fetch cascade status from the contribution worker and render."""
+    try:
+        import httpx
+        from reflex.curate.uploader import HTTP_TIMEOUT_S, _worker_url
+        r = httpx.get(
+            f"{_worker_url()}/v1/revoke/cascade-status/{request_id}",
+            timeout=HTTP_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Failed to reach worker:[/red] {exc}")
+        raise typer.Exit(2)
+
+    if r.status_code == 404:
+        console.print(
+            f"[red]Request not found:[/red] [cyan]{request_id}[/cyan]\n"
+            f"[dim]Either the request_id is wrong, or it predates the cascade-status "
+            f"endpoint deploy. Email privacy@fastcrest.com if you need help.[/dim]"
+        )
+        raise typer.Exit(2)
+    if r.status_code != 200:
+        console.print(f"[red]Worker returned status={r.status_code}:[/red] {r.text[:300]}")
+        raise typer.Exit(2)
+
+    data = r.json()
+    overall = data.get("overall_status", "unknown")
+    overall_color = "green" if overall == "completed" else "yellow"
+    console.print(
+        f"[bold]Revoke cascade:[/bold] [{overall_color}]{overall}[/{overall_color}]"
+    )
+    console.print(
+        f"  request_id:     [dim]{data['request_id']}[/dim]"
+    )
+    console.print(
+        f"  contributor_id: [dim]{data['contributor_id']}[/dim]"
+    )
+    console.print(f"  requested_at:   {data['requested_at']}")
+    if data.get("completed_at"):
+        console.print(f"  completed_at:   {data['completed_at']}")
+    console.print()
+
+    table = Table(title="Cascade stages", show_header=True)
+    table.add_column("Stage")
+    table.add_column("Status")
+    table.add_column("Completed at", overflow="fold")
+    table.add_column("Detail")
+
+    for stage in data.get("stages", []):
+        name = stage.get("name", "?")
+        st = stage.get("status", "?")
+        st_color = {
+            "completed": "green",
+            "in_progress": "yellow",
+            "pending": "dim",
+        }.get(st, "white")
+        at = stage.get("at") or "—"
+        detail_parts = []
+        if stage.get("objects_purged") is not None:
+            detail_parts.append(f"{stage['objects_purged']} R2 objects")
+        if stage.get("datasets_rebuilt") is not None:
+            detail_parts.append(f"{stage['datasets_rebuilt']} datasets")
+        if stage.get("notifications_sent") is not None:
+            detail_parts.append(f"{stage['notifications_sent']} notifications")
+        detail = " · ".join(detail_parts) or ""
+        table.add_row(name, f"[{st_color}]{st}[/{st_color}]", at, detail)
+    console.print(table)
+
+    if overall != "completed":
+        console.print(
+            f"\n[dim]Cascade SLA: {data.get('sla_days', 30)} days. "
+            f"Re-run [cyan]reflex contribute --revoke-status {request_id}[/cyan] "
+            f"to refresh.[/dim]"
+        )
 
 
 __all__ = ["contribute_app"]

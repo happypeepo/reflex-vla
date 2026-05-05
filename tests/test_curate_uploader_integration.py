@@ -153,3 +153,52 @@ def test_complete_without_put_returns_412(smoke_contributor_id: str) -> None:
         _complete_upload(upload_id=sign["upload_id"], episode_count=1)
     # 412 precondition failed — bytes weren't put
     assert exc_info.value.status == 412
+
+
+@REQUIRES_LIVE_WORKER
+def test_revoke_cascade_status_endpoint(smoke_contributor_id: str) -> None:
+    """Verify the 5-stage cascade status endpoint returns expected shape."""
+    import httpx
+    from reflex.curate.uploader import _worker_url
+
+    # Initiate revoke (no prior upload — just testing the cascade shape)
+    revoke = httpx.post(
+        f"{_worker_url()}/v1/revoke/cascade",
+        json={"contributor_id": smoke_contributor_id, "scope": "all"},
+        timeout=10.0,
+    ).json()
+    assert "request_id" in revoke
+    request_id = revoke["request_id"]
+
+    # Status endpoint immediately after revoke — cascade should be in_progress
+    # with revoke + auto-completed Phase 1 stages 4 + 5 marked complete.
+    status = httpx.get(
+        f"{_worker_url()}/v1/revoke/cascade-status/{request_id}", timeout=10.0,
+    ).json()
+    assert status["request_id"] == request_id
+    assert status["contributor_id"] == smoke_contributor_id
+    assert status["overall_status"] in ("in_progress", "completed")
+
+    # Stage shape
+    stage_names = {s["name"] for s in status["stages"]}
+    assert stage_names == {
+        "revoke", "tombstone", "r2_purge", "derived_rebuild", "buyer_notification"
+    }
+
+    # Phase 1 simplification: derived_rebuild + buyer_notification auto-complete
+    derived = next(s for s in status["stages"] if s["name"] == "derived_rebuild")
+    buyer = next(s for s in status["stages"] if s["name"] == "buyer_notification")
+    assert derived["status"] == "completed"
+    assert buyer["status"] == "completed"
+
+
+@REQUIRES_LIVE_WORKER
+def test_revoke_cascade_status_404_unknown_request() -> None:
+    import httpx
+    from reflex.curate.uploader import _worker_url
+
+    r = httpx.get(
+        f"{_worker_url()}/v1/revoke/cascade-status/rev_does_not_exist",
+        timeout=10.0,
+    )
+    assert r.status_code == 404

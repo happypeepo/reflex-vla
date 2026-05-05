@@ -35,6 +35,12 @@ const DEFAULT_DAILY_UPLOADS_LIMIT = 1000;
 const SIGNED_URL_TTL_SECONDS = 15 * 60;                    // 15 minutes
 const REVOKE_SLA_DAYS = 30;
 
+// Cascade stage SLAs (per consent-revoke_research.md open question 1: tighter
+// is better for trust signaling; spec's 24h is conservative).
+const TOMBSTONE_DELAY_MS = 5 * 60 * 1000;          // 5 min — covers in-flight uploads
+const R2_PURGE_DELAY_MS = 10 * 60 * 1000;          // 10 min total — purge after tombstone
+const R2_LIST_PAGE_SIZE = 1000;                     // R2 list pagination size
+
 // ---------- request router ----------
 
 export default {
@@ -61,6 +67,14 @@ export default {
         return await postUploadsComplete(request, env);
       if (method === "POST" && path === "/v1/revoke/cascade")
         return await postRevokeCascade(request, env);
+      if (method === "GET" && path.startsWith("/v1/revoke/cascade-status/")) {
+        const requestId = path.split("/").pop();
+        return await getRevokeCascadeStatus(requestId, env);
+      }
+      if (method === "POST" && path.startsWith("/admin/cascade-execute/")) {
+        const requestId = path.split("/").pop();
+        return await adminAuth(request, env, () => adminExecuteCascade(requestId, env));
+      }
       if (method === "GET" && path.startsWith("/v1/contributors/")) {
         const parts = path.split("/").filter(Boolean);
         // /v1/contributors/<id>/stats
@@ -441,12 +455,20 @@ async function initiateRevoke(env, contributorId, scope, source) {
          last_active_at = excluded.last_active_at`
   ).bind(contributorId, nowIso, nowIso, nowIso).run();
 
+  // Phase 1 simplification (per consent-revoke_research.md): no derived
+  // datasets / buyers exist yet, so Stages 4 + 5 auto-complete at init.
   await env.DB.prepare(
-    `INSERT INTO revoke_requests (request_id, contributor_id, requested_at, scope, status, notes)
-       VALUES (?, ?, ?, ?, 'pending', ?)`
-  ).bind(requestId, contributorId, nowIso, scope, `source=${source}`).run();
+    `INSERT INTO revoke_requests
+       (request_id, contributor_id, requested_at, scope, status,
+        derived_rebuild_completed_at, buyer_notification_completed_at, notes)
+       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`
+  ).bind(
+    requestId, contributorId, nowIso, scope,
+    nowIso, nowIso,  // derived_rebuild + buyer_notification auto-complete
+    `source=${source}; phase1_no_derived_datasets_no_buyers`,
+  ).run();
 
-  // Optional: alert via Slack so an operator can run the cascade job.
+  // Optional: alert via Slack so an operator can monitor.
   if (env.SLACK_WEBHOOK_URL) {
     await postSlack(env.SLACK_WEBHOOK_URL, {
       text: `Curate revoke requested — contributor_id=${contributorId} scope=${scope} source=${source}. Cascade SLA: ${REVOKE_SLA_DAYS} days.`,
@@ -457,8 +479,167 @@ async function initiateRevoke(env, contributorId, scope, source) {
     request_id: requestId,
     contributor_id: contributorId,
     sla_days: REVOKE_SLA_DAYS,
-    note: "Cascade purge runs as a background job. Status: GET /v1/contributors/:id/stats.",
+    note: "Cascade auto-progresses via /v1/revoke/cascade-status/<request_id>.",
   });
+}
+
+
+/**
+ * GET /v1/revoke/cascade-status/<request_id>
+ *
+ * Returns the current cascade state for a request. Lazily progresses the
+ * cascade through any stages whose SLA has elapsed (no separate cron needed).
+ */
+async function getRevokeCascadeStatus(requestId, env) {
+  if (!requestId) return jsonResponse(400, { error: "missing_request_id" });
+  const fresh = await loadAndProgressCascade(requestId, env, { force: false });
+  if (!fresh) return jsonResponse(404, { error: "request_not_found" });
+  return jsonResponse(200, formatCascadeStatus(fresh));
+}
+
+
+async function adminExecuteCascade(requestId, env) {
+  if (!requestId) return jsonResponse(400, { error: "missing_request_id" });
+  const fresh = await loadAndProgressCascade(requestId, env, { force: true });
+  if (!fresh) return jsonResponse(404, { error: "request_not_found" });
+  return jsonResponse(200, formatCascadeStatus(fresh));
+}
+
+
+function formatCascadeStatus(req) {
+  const stages = [
+    { name: "revoke", at: req.requested_at, status: "completed" },
+    { name: "tombstone", at: req.tombstone_at, status: req.tombstone_at ? "completed" : "pending" },
+    { name: "r2_purge",
+      at: req.r2_purge_completed_at,
+      status: req.r2_purge_completed_at ? "completed" :
+              req.r2_purge_started_at ? "in_progress" : "pending",
+      objects_purged: req.r2_objects_purged || 0 },
+    { name: "derived_rebuild",
+      at: req.derived_rebuild_completed_at,
+      status: req.derived_rebuild_completed_at ? "completed" : "pending",
+      datasets_rebuilt: req.derived_datasets_rebuilt || 0 },
+    { name: "buyer_notification",
+      at: req.buyer_notification_completed_at,
+      status: req.buyer_notification_completed_at ? "completed" : "pending",
+      notifications_sent: req.buyer_notifications_sent || 0 },
+  ];
+  const allDone = stages.every((s) => s.status === "completed");
+  return {
+    request_id: req.request_id,
+    contributor_id: req.contributor_id,
+    requested_at: req.requested_at,
+    overall_status: allDone ? "completed" : "in_progress",
+    stages,
+    sla_days: REVOKE_SLA_DAYS,
+    completed_at: req.completed_at,
+  };
+}
+
+
+/**
+ * Load the request, progress any stages whose SLA has elapsed, return fresh row.
+ * Idempotent — each stage checks its completion timestamp before running.
+ *
+ * Args:
+ *   force: bypass SLA waits (admin path)
+ */
+async function loadAndProgressCascade(requestId, env, { force = false } = {}) {
+  let req = await env.DB.prepare(
+    `SELECT * FROM revoke_requests WHERE request_id = ?`
+  ).bind(requestId).first();
+  if (!req) return null;
+  if (req.status === "completed") return req;
+
+  const now = Date.now();
+  const requestedAtMs = Date.parse(req.requested_at);
+  const nowIso = new Date(now).toISOString();
+
+  // Stage 2 — tombstone (5 min after revoke; immediate on force).
+  if (!req.tombstone_at && (force || now - requestedAtMs >= TOMBSTONE_DELAY_MS)) {
+    await env.DB.prepare(
+      `UPDATE revoke_requests SET tombstone_at = ? WHERE request_id = ?`
+    ).bind(nowIso, requestId).run();
+    req.tombstone_at = nowIso;
+  }
+
+  // Stage 3 — R2 purge (10 min after revoke; immediate on force).
+  if (!req.r2_purge_completed_at && (force || now - requestedAtMs >= R2_PURGE_DELAY_MS)) {
+    await executeR2Purge(env, req);
+    req = await env.DB.prepare(
+      `SELECT * FROM revoke_requests WHERE request_id = ?`
+    ).bind(requestId).first();
+  }
+
+  // Stage 4 + 5 already auto-completed at init for Phase 1 (no derived
+  // datasets / buyers exist).
+
+  // Top-level completion check.
+  if (
+    req.tombstone_at &&
+    req.r2_purge_completed_at &&
+    req.derived_rebuild_completed_at &&
+    req.buyer_notification_completed_at &&
+    req.status !== "completed"
+  ) {
+    await env.DB.prepare(
+      `UPDATE revoke_requests SET status = 'completed', completed_at = ? WHERE request_id = ?`
+    ).bind(nowIso, requestId).run();
+    req.status = "completed";
+    req.completed_at = nowIso;
+  }
+
+  return req;
+}
+
+
+async function executeR2Purge(env, req) {
+  const startedAtIso = new Date().toISOString();
+  await env.DB.prepare(
+    `UPDATE revoke_requests SET r2_purge_started_at = COALESCE(r2_purge_started_at, ?)
+       WHERE request_id = ?`
+  ).bind(startedAtIso, req.request_id).run();
+
+  // Determine tier prefix. We don't know tier from the request row alone,
+  // so try all 3 tiers ("free-contributors", "pro-contributors",
+  // "enterprise-contributors"). At Phase 1 only one will have data.
+  const prefixes = [
+    `free-contributors/${req.contributor_id}/`,
+    `pro-contributors/${req.contributor_id}/`,
+    `enterprise-contributors/${req.contributor_id}/`,
+  ];
+
+  let totalPurged = 0;
+  for (const prefix of prefixes) {
+    let cursor = undefined;
+    while (true) {
+      const list = await env.CURATE_BUCKET.list({
+        prefix,
+        limit: R2_LIST_PAGE_SIZE,
+        cursor,
+      });
+      if (!list.objects || list.objects.length === 0) break;
+      // Delete each object. R2's delete() takes single key per call;
+      // delete-many (batch) isn't supported in the worker SDK.
+      for (const obj of list.objects) {
+        await env.CURATE_BUCKET.delete(obj.key);
+        totalPurged += 1;
+      }
+      if (!list.truncated) break;
+      cursor = list.cursor;
+    }
+  }
+
+  // Also mark all uploads for this contributor as purged in D1.
+  const completedAtIso = new Date().toISOString();
+  await env.DB.prepare(
+    `UPDATE uploads SET status = 'purged' WHERE contributor_id = ?`
+  ).bind(req.contributor_id).run();
+  await env.DB.prepare(
+    `UPDATE revoke_requests
+       SET r2_purge_completed_at = ?, r2_objects_purged = ?
+       WHERE request_id = ?`
+  ).bind(completedAtIso, totalPurged, req.request_id).run();
 }
 
 function isSafeFileName(name) {

@@ -52,6 +52,12 @@ CREATE TABLE IF NOT EXISTS daily_uploads (
 CREATE INDEX IF NOT EXISTS idx_daily_uploads_date ON daily_uploads(utc_date);
 
 -- Revoke requests. One row per /v1/revoke/cascade call.
+-- Phase 1 cascade stages (per consent-revoke_research.md):
+--   T+0          revoke immediate (request row created)
+--   T+5min       tombstone (sign endpoint already refuses; this stage just stamps the time)
+--   T+5min+      R2 purge (paginated list+delete under <tier>-contributors/<id>/)
+--   auto         derived dataset rebuild (no datasets at Phase 1; auto-complete on cascade init)
+--   auto         buyer notification (no buyers at Phase 1; auto-complete on cascade init)
 CREATE TABLE IF NOT EXISTS revoke_requests (
   request_id TEXT PRIMARY KEY,              -- UUID4
   contributor_id TEXT NOT NULL,
@@ -61,10 +67,22 @@ CREATE TABLE IF NOT EXISTS revoke_requests (
   r2_objects_purged INTEGER NOT NULL DEFAULT 0,
   derived_datasets_rebuilt INTEGER NOT NULL DEFAULT 0,
   buyer_notifications_sent INTEGER NOT NULL DEFAULT 0,
-  completed_at TEXT,
+  -- Stage timestamp columns (additive in v1.1; NULL until that stage runs).
+  tombstone_at TEXT,
+  r2_purge_started_at TEXT,
+  r2_purge_completed_at TEXT,
+  derived_rebuild_completed_at TEXT,
+  buyer_notification_completed_at TEXT,
+  completed_at TEXT,                        -- top-level: all stages done
   notes TEXT,
   FOREIGN KEY (contributor_id) REFERENCES contributors(contributor_id)
 );
+
+-- Migration helper for existing DBs (no-op on fresh install).
+-- Cloudflare D1's `IF NOT EXISTS` on ALTER doesn't exist; instead we
+-- handle column-add at the application layer (worker reads NULL when
+-- absent). The CREATE TABLE above already includes the new columns for
+-- fresh installs.
 
 CREATE INDEX IF NOT EXISTS idx_revoke_status ON revoke_requests(status);
 CREATE INDEX IF NOT EXISTS idx_revoke_contributor ON revoke_requests(contributor_id);

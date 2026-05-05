@@ -561,6 +561,14 @@ class Uploader:
             except Exception as exc:  # noqa: BLE001 — quality scoring never blocks upload
                 logger.warning("uploader.quality_scoring_failed file=%s: %s", jsonl_path.name, exc)
 
+            # Failure mode classification — flags is_failure + primary_failure_mode.
+            # Per research sidecar open question 1: runs BEFORE dedup so
+            # dedup canonical-selection can avoid picking a failed canonical.
+            try:
+                self._stamp_failure_modes(jsonl_path, accepted)
+            except Exception as exc:  # noqa: BLE001 — classifier never blocks upload
+                logger.warning("uploader.failure_classifier_failed file=%s: %s", jsonl_path.name, exc)
+
             # Episode-level dedup (within-file; cross-session dedup is Phase 1.5).
             # Stamps cluster_id + is_canonical on each row's metadata. NEVER
             # deletes data per the spec — flagging only.
@@ -737,6 +745,34 @@ class Uploader:
                 "uploader.dedup file=%s clusters=%s",
                 jsonl_path.name, non_singletons,
             )
+
+    def _stamp_failure_modes(
+        self,
+        jsonl_path: Path,
+        accepted: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        """Classify each accepted episode by failure mode + stamp result onto rows."""
+        from reflex.curate.failure_classifier import classify_from_jsonl_rows
+
+        for episode_id, rows in accepted.items():
+            try:
+                result = classify_from_jsonl_rows(rows)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("uploader.failure_classifier_episode_failed episode=%s: %s", episode_id, exc)
+                continue
+            payload = result.to_dict()
+            for r in rows:
+                md = r.setdefault("metadata", {}) or {}
+                md["failure_modes"] = payload["failure_modes"]
+                md["is_failure"] = payload["is_failure"]
+                md["primary_failure_mode"] = payload["primary_failure_mode"]
+                md["classifier_version"] = payload["classifier_version"]
+            if result.is_failure:
+                logger.info(
+                    "uploader.failure_modes file=%s episode=%s primary=%s n_modes=%d",
+                    jsonl_path.name, episode_id,
+                    result.primary_failure_mode, len(result.failure_modes),
+                )
 
     def _stamp_metadata(
         self,
