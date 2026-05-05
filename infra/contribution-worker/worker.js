@@ -241,6 +241,21 @@ async function postUploadsSign(request, env) {
        ON CONFLICT(contributor_id) DO UPDATE SET last_active_at = excluded.last_active_at`
   ).bind(contributorId, tier, nowIso, nowIso).run();
 
+  // Reservation-based rate limiting (Phase 1.5; closes the bypass surfaced in
+  // reflex_context/03_experiments/2026-05-06-contribution-worker-stress-test.md).
+  // Reserve byte_size + 1 upload count NOW, before returning the signed URL.
+  // /complete no longer touches daily_uploads — sign is the consumption event.
+  // Effect: a client that signs without completing still consumes its quota,
+  // closing the soft-DoS / quota-bypass vector. Daily counter resets at UTC
+  // midnight on its own (utc_date PK); no GC required.
+  await env.DB.prepare(
+    `INSERT INTO daily_uploads (contributor_id, utc_date, bytes_uploaded, uploads_count)
+       VALUES (?, ?, ?, 1)
+       ON CONFLICT(contributor_id, utc_date) DO UPDATE SET
+         bytes_uploaded = bytes_uploaded + excluded.bytes_uploaded,
+         uploads_count = uploads_count + 1`
+  ).bind(contributorId, utcDate, byteSize).run();
+
   // Build R2 key + upload_id.
   const subdir = tier === "free" ? "free-contributors" : `${tier}-contributors`;
   const r2Key = `${subdir}/${contributorId}/${utcDate}/${fileName}`;
@@ -378,6 +393,9 @@ async function postUploadsComplete(request, env) {
   const utcDate = nowIso.slice(0, 10);
 
   // Mark the upload completed + update aggregate counters atomically.
+  // daily_uploads is NO LONGER updated here — /v1/uploads/sign reserves
+  // the quota up front (Phase 1.5 fix; see reservation-based rate
+  // limiting comment in postUploadsSign).
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE uploads SET status = 'completed', completed_at = ? WHERE upload_id = ?`
@@ -390,13 +408,6 @@ async function postUploadsComplete(request, env) {
              last_active_at = ?
          WHERE contributor_id = ?`
     ).bind(episodeCount, upload.byte_size, nowIso, upload.contributor_id),
-    env.DB.prepare(
-      `INSERT INTO daily_uploads (contributor_id, utc_date, bytes_uploaded, uploads_count)
-         VALUES (?, ?, ?, 1)
-         ON CONFLICT(contributor_id, utc_date) DO UPDATE SET
-           bytes_uploaded = bytes_uploaded + excluded.bytes_uploaded,
-           uploads_count = uploads_count + 1`
-    ).bind(upload.contributor_id, utcDate, upload.byte_size),
   ]);
 
   return jsonResponse(200, { status: "completed", upload_id: uploadId });

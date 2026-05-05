@@ -160,15 +160,20 @@ def test_daily_upload_count_limit(*, max_uploads: int = 1000) -> StressOutcome:
     )
 
 
-def test_daily_byte_limit(*, byte_size_per_request: int = 1_100_000_000) -> StressOutcome:
-    """Each request reserves ~1.1 GB; the 10th hit should cross 10 GB → 429."""
+def test_daily_byte_limit(*, byte_size_per_request: int = 1_073_000_000) -> StressOutcome:
+    """11 sequential ~1 GiB signs; the 11th should cross 10 GiB → 429.
+
+    Per-request cap is 1 GiB (1,073,741,824 bytes). Using 1,073,000,000 keeps
+    each request just under the per-request cap. 10 × 1.073e9 = 10.73e9
+    (under 10 GiB = 10.737e9 threshold), 11th = 11.80e9 → 429.
+    """
     cid = _smoke_contributor_id()
     statuses: list[int] = []
     rejected_at: int | None = None
     last_429_body = ""
 
     with httpx.Client() as client:
-        # 10 × 1.1 GB = 11 GB; threshold of 10 GB should reject the 10th.
+        # 11 × 1.073 GB = 11.8 GiB; 10 GiB threshold rejects the 11th.
         for i in range(11):
             r = _sign(client, contributor_id=cid, byte_size=byte_size_per_request)
             statuses.append(r.status_code)
@@ -177,18 +182,18 @@ def test_daily_byte_limit(*, byte_size_per_request: int = 1_100_000_000) -> Stre
                     rejected_at = i
                 last_429_body = r.text[:300]
 
-    # 1.1 GB × 9 = 9.9 GB (under 10), 1.1 GB × 10 = 11 GB (over).
-    # So expect 9 successes then 429 at index 9 (the 10th request).
-    passed = (rejected_at == 9) and ("daily_byte_limit_exceeded" in last_429_body)
+    # 10 successes (10.73 GB just under 10 GiB) then 429 at index 10 (11th request).
+    passed = (rejected_at == 10) and ("daily_byte_limit_exceeded" in last_429_body)
 
     return StressOutcome(
         test="daily_byte_limit",
-        expected="9 200 OK (9.9 GB) then 429 at request 10 (would exceed 10 GB)",
+        expected="10 200 OK then 429 at request 11 (cumulative ~11.8 GiB > 10 GiB threshold)",
         observed=f"first 429 at request {rejected_at}; body contains daily_byte_limit_exceeded={'daily_byte_limit_exceeded' in last_429_body}",
         passed=passed,
         details={
             "contributor_id": cid,
             "first_429_body": last_429_body,
+            "status_distribution": dict([(s, statuses.count(s)) for s in set(statuses)]),
         },
     )
 
