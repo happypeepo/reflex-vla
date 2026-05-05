@@ -168,8 +168,11 @@ def _build_lerobot_command(cfg: FinetuneConfig) -> list[str]:
         cmd.append(f"--policy.pretrained_path={cfg.base}")
     if is_from_scratch and cfg.chunk_size:
         # ACT (and similar chunked policies) need chunk_size; pretrained bases
-        # bake this in.
+        # bake this in. auto_soarm convention (per its train.py): set
+        # n_action_steps == chunk_size so ACTConfig.__post_init__ doesn't
+        # reject the default n_action_steps=100 against a smaller chunk_size.
         cmd.append(f"--policy.chunk_size={cfg.chunk_size}")
+        cmd.append(f"--policy.n_action_steps={cfg.chunk_size}")
     if cfg.mode == "lora":
         cmd.extend([
             f"--peft.method_type=lora",
