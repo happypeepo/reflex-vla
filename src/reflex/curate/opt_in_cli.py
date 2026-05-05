@@ -78,20 +78,29 @@ def main(
     info: bool = typer.Option(
         False, "--info", help="Show full privacy + legal details before deciding.",
     ),
+    inspect: bool = typer.Option(
+        False, "--inspect",
+        help="List files in the local upload queue with episode counts + sizes.",
+    ),
+    purge: str = typer.Option(
+        "", "--purge",
+        help="Remove a specific queued file by name (run --inspect first to see names).",
+    ),
     yes: bool = typer.Option(
         False, "--yes", "-y",
-        help="Auto-confirm prompts (for --revoke). Required in non-interactive contexts.",
+        help="Auto-confirm prompts (for --revoke / --purge). Required in non-interactive contexts.",
     ),
 ) -> None:
     """Reflex Data Contribution program — opt in, opt out, or check status."""
     if ctx.invoked_subcommand is not None:
         return
 
-    flags = [opt_in, opt_out, revoke, status, info]
+    flags = [opt_in, opt_out, revoke, status, info, inspect, bool(purge)]
     set_count = sum(1 for f in flags if f)
     if set_count > 1:
         console.print(
-            "[red]Pick one of:[/red] --opt-in, --opt-out, --revoke, --status, --info"
+            "[red]Pick one of:[/red] --opt-in, --opt-out, --revoke, --status, "
+            "--info, --inspect, --purge"
         )
         raise typer.Exit(2)
 
@@ -106,6 +115,12 @@ def main(
         return
     if revoke:
         _cmd_revoke(yes=yes)
+        return
+    if inspect:
+        _cmd_inspect()
+        return
+    if purge:
+        _cmd_purge(target=purge, yes=yes)
         return
     # No flag set OR --status set: show status
     _cmd_status()
@@ -262,6 +277,97 @@ def _cmd_status() -> None:
         "ships in Phase 1 (uploader spec: features/08_curate/_collection/"
         "data-collection-free-tier.md).[/dim]"
     )
+
+
+def _cmd_inspect() -> None:
+    """List files in ~/.reflex/contribute/queue/ + sibling subdirs."""
+    from collections import defaultdict
+    from reflex.curate.uploader import (
+        DEFAULT_QUEUE_DIR,
+        DEFAULT_REJECTED_DIR,
+        DEFAULT_UPLOADED_DIR,
+    )
+
+    def _summarize(label: str, dir_path: Path) -> tuple[int, int, list[tuple[str, int, int]]]:
+        if not dir_path.exists():
+            return 0, 0, []
+        entries: list[tuple[str, int, int]] = []
+        total_bytes = 0
+        for f in sorted(dir_path.glob("*.jsonl")):
+            size = f.stat().st_size
+            try:
+                # Cheap line count for episode-ish granularity
+                with open(f) as fh:
+                    line_count = sum(1 for _ in fh)
+            except OSError:
+                line_count = -1
+            entries.append((f.name, line_count, size))
+            total_bytes += size
+        return len(entries), total_bytes, entries
+
+    queue = Path(DEFAULT_QUEUE_DIR).expanduser()
+    uploaded = Path(DEFAULT_UPLOADED_DIR).expanduser()
+    rejected = Path(DEFAULT_REJECTED_DIR).expanduser()
+
+    n_q, b_q, files_q = _summarize("queue", queue)
+    n_u, b_u, _ = _summarize("uploaded", uploaded)
+    n_r, b_r, _ = _summarize("rejected", rejected)
+
+    summary = Table(show_header=True, title="Contribution queue")
+    summary.add_column("Bucket")
+    summary.add_column("Files", justify="right")
+    summary.add_column("Size", justify="right")
+    summary.add_row(f"queue ({queue})", str(n_q), f"{b_q / 1024:.1f} KB")
+    summary.add_row(f"uploaded ({uploaded})", str(n_u), f"{b_u / 1024:.1f} KB")
+    summary.add_row(f"rejected ({rejected})", str(n_r), f"{b_r / 1024:.1f} KB")
+    console.print(summary)
+
+    if files_q:
+        details = Table(show_header=True, title="Queued files")
+        details.add_column("Name")
+        details.add_column("Lines", justify="right")
+        details.add_column("Size", justify="right")
+        for name, lines, size in files_q:
+            line_str = "?" if lines < 0 else str(lines)
+            details.add_row(name, line_str, f"{size / 1024:.1f} KB")
+        console.print(details)
+        console.print(
+            "[dim]Remove a queued file with: "
+            "[cyan]reflex contribute --purge <name>[/cyan][/dim]"
+        )
+    else:
+        console.print("[dim]No files currently in the upload queue.[/dim]")
+
+
+def _cmd_purge(*, target: str, yes: bool) -> None:
+    """Remove a specific queued file before upload."""
+    from reflex.curate.uploader import DEFAULT_QUEUE_DIR
+
+    queue = Path(DEFAULT_QUEUE_DIR).expanduser()
+    if not queue.exists():
+        console.print("[dim]No queue directory exists yet — nothing to purge.[/dim]")
+        return
+    target_path = queue / target
+    if not target_path.exists() or not target_path.is_file():
+        console.print(
+            f"[red]No queued file named[/red] [cyan]{target}[/cyan] [red]in[/red] "
+            f"{queue}.\n"
+            f"[dim]Run [cyan]reflex contribute --inspect[/cyan] to see queued files.[/dim]"
+        )
+        raise typer.Exit(2)
+
+    if not yes:
+        try:
+            ok = typer.confirm(f"Remove {target_path}?", default=False)
+        except (EOFError, OSError):
+            console.print("[red]Non-interactive — pass --yes to confirm.[/red]")
+            raise typer.Exit(2)
+        if not ok:
+            console.print("[dim]Purge cancelled.[/dim]")
+            return
+
+    target_path.unlink()
+    console.print(f"[green]✓[/green] Removed [cyan]{target_path}[/cyan].")
 
 
 __all__ = ["contribute_app"]

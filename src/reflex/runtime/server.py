@@ -2076,9 +2076,40 @@ def create_app(
             except Exception as exc:  # noqa: BLE001 — never block startup on heartbeat scaffolding
                 logger.warning("Pro heartbeat scaffolding failed: %s", exc)
 
+        # Curate uploader scaffolding — daily background upload of the
+        # contribution queue at ~/.reflex/contribute/queue/. Phase 1 runs
+        # in dry-run mode (the contribution worker has not been deployed
+        # yet); when live=True is enabled and the worker is up, this is
+        # the path that ships data to R2.
+        _curate_uploader = None
+        try:
+            from reflex.curate import consent as _curate_consent
+            if _curate_consent.is_opted_in():
+                from reflex.curate.uploader import Uploader as _CurateUploader
+                _curate_receipt = _curate_consent.load()
+                _curate_uploader = _CurateUploader(
+                    contributor_id=_curate_receipt.contributor_id,
+                    live=False,  # Phase 1 dry-run; flip to True when worker deploys
+                )
+                _curate_uploader.start()
+                logger.info(
+                    "curate uploader started (dry-run; contributor_id=%s)",
+                    _curate_receipt.contributor_id,
+                )
+        except Exception as exc:  # noqa: BLE001 — never block startup on uploader scaffolding
+            logger.warning("curate uploader scaffolding failed: %s", exc)
+            _curate_uploader = None
+
         try:
             yield
         finally:
+            # Stop the curate uploader if it was started.
+            if _curate_uploader is not None:
+                try:
+                    _curate_uploader.stop(drain=True)
+                    logger.info("curate uploader stopped")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("curate uploader.stop failed: %s", exc)
             # Cancel the Pro heartbeat task if running.
             if _heartbeat_task is not None and not _heartbeat_task.done():
                 _heartbeat_task.cancel()
