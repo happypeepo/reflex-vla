@@ -59,12 +59,16 @@ class LeRobotV3Converter(FormatConverter):
         action_names: list[str] | None = None,
         state_names: list[str] | None = None,
         license: str = "CC-BY-4.0",
+        video_camera_name: str = "cam_main",
+        encode_videos: bool = True,
     ):
         self.robot_type = robot_type
         self.fps = int(fps)
         self.action_names = action_names
         self.state_names = state_names
         self.license = license
+        self.video_camera_name = video_camera_name
+        self.encode_videos = bool(encode_videos)
 
     def convert(
         self,
@@ -184,6 +188,19 @@ class LeRobotV3Converter(FormatConverter):
                 "tasks": [task_idx],
                 "length": step_count,
             })
+
+            # Video materialization (per [curate-video] extra). Skips when
+            # frames aren't decodable (hash-only image_b64) or when the
+            # encoder dep isn't installed.
+            video_dims = None
+            if self.encode_videos:
+                video_dims = self._maybe_encode_episode_video(
+                    output=output,
+                    episode_index=episode_index,
+                    rows=rows,
+                    result=result,
+                )
+
             episode_index += 1
 
         if result.episode_count == 0:
@@ -213,12 +230,75 @@ class LeRobotV3Converter(FormatConverter):
         with open(output / "README.md", "w") as f:
             f.write(readme)
 
-        # Note about videos: not materialized in v1.
-        result.warnings.append(
-            "videos_not_materialized:install [curate-video] extra + use --record-images full"
-        )
         result.completed_at = _utc_now_iso()
         return result
+
+    def _maybe_encode_episode_video(
+        self,
+        *,
+        output: Path,
+        episode_index: int,
+        rows: list[dict[str, Any]],
+        result: ConversionResult,
+    ) -> tuple[int, int] | None:
+        """Encode the episode's frames to mp4 if image bytes are available
+        and the [curate-video] extra is installed. Returns (width, height) on
+        success, None when skipped."""
+        try:
+            from reflex.curate.format_converters.shared.video_encoder import (
+                VideoEncoderUnavailable,
+                collect_frames_from_rows,
+                encode_frames_to_mp4,
+            )
+        except ImportError:
+            # Shared module always imports; this branch is unreachable but
+            # keeps the type-checker honest.
+            return None
+
+        frames = collect_frames_from_rows(rows)
+        if not frames:
+            # image_b64 is hash-only or absent — typical for default
+            # `--record-images hash_only` mode. Note once per converter pass.
+            if "videos_skipped_hash_only" not in result.skipped_reasons:
+                result.warnings.append(
+                    "videos_skipped:image_b64_is_hash_only_or_absent"
+                )
+            result.skipped_reasons["videos_skipped_hash_only"] += 1
+            return None
+
+        video_path = (
+            output / "videos" / "chunk-000"
+            / f"observation.images.{self.video_camera_name}"
+            / f"episode_{episode_index:06d}.mp4"
+        )
+        try:
+            bytes_written = encode_frames_to_mp4(
+                frames=frames,
+                output_path=video_path,
+                fps=self.fps,
+            )
+        except VideoEncoderUnavailable as exc:
+            if "video_encoder_unavailable" not in result.skipped_reasons:
+                result.warnings.append(
+                    f"videos_skipped:install [curate-video] extra ({exc})"
+                )
+            result.skipped_reasons["video_encoder_unavailable"] += 1
+            return None
+        except Exception as exc:  # noqa: BLE001
+            result.warnings.append(
+                f"videos_episode_{episode_index:06d}_failed:{exc}"
+            )
+            return None
+
+        result.bytes_written += bytes_written
+        # Read back the dimensions for info.json features schema.
+        try:
+            from PIL import Image
+            import io as _io
+            img = Image.open(_io.BytesIO(frames[0])).convert("RGB")
+            return img.size
+        except Exception:  # noqa: BLE001
+            return None
 
     def _build_info_json(
         self,

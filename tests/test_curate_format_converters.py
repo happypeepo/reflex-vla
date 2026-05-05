@@ -123,14 +123,34 @@ def test_lerobot_v3_canonical_only_filters(tmp_path: Path) -> None:
     assert result.episode_count == 1
 
 
-def test_lerobot_v3_emits_videos_warning(tmp_path: Path) -> None:
+def test_lerobot_v3_emits_videos_skipped_warning_for_hash_only(tmp_path: Path) -> None:
+    """JSONL with hash-only image_b64 → converter skips video encoding + warns."""
     pytest.importorskip("pyarrow")
     jsonl = tmp_path / "input.jsonl"
     _seed_jsonl(jsonl)
     out = tmp_path / "out_warn"
 
     result = LeRobotV3Converter().convert(input_jsonl=jsonl, output_dir=out)
-    assert any("videos_not_materialized" in w for w in result.warnings)
+    # Either warning shape is acceptable: missing image bytes (hash-only seed)
+    # OR the [curate-video] extra not installed in the test env.
+    has_skip_warn = any(
+        "videos_skipped" in w or "video_encoder_unavailable" in w
+        for w in result.warnings
+    )
+    assert has_skip_warn
+
+
+def test_lerobot_v3_disable_videos_no_warning(tmp_path: Path) -> None:
+    """encode_videos=False → no videos warning at all."""
+    pytest.importorskip("pyarrow")
+    jsonl = tmp_path / "input.jsonl"
+    _seed_jsonl(jsonl)
+    out = tmp_path / "out_no_video"
+
+    result = LeRobotV3Converter(encode_videos=False).convert(
+        input_jsonl=jsonl, output_dir=out,
+    )
+    assert not any("videos_skipped" in w for w in result.warnings)
 
 
 # ── HDF5 ───────────────────────────────────────────────────────────────────
@@ -224,6 +244,115 @@ def test_oxe_skeleton_raises_install_message(tmp_path: Path) -> None:
 def test_oxe_unknown_embodiment_falls_back() -> None:
     converter = OpenXEmbodimentConverter(embodiment="ufo_arm")
     assert converter.oxe_embodiment == "unknown"
+
+
+# ── RLDS full impl (gated on [curate-rlds] extra) ──────────────────────────
+
+
+def test_rlds_full_round_trip(tmp_path: Path) -> None:
+    """End-to-end RLDS → tfrecord write + parse-back via tf.data."""
+    tf = pytest.importorskip("tensorflow")
+    jsonl = tmp_path / "input.jsonl"
+    _seed_jsonl(jsonl)
+    out = tmp_path / "out_rlds"
+
+    converter = RLDSConverter(dataset_name="reflex_test", shard_size=10)
+    result = converter.convert(input_jsonl=jsonl, output_dir=out)
+    assert result.episode_count == 2
+    assert (out / "dataset_info.json").exists()
+    assert (out / "features.json").exists()
+    # At least one TFRecord shard
+    tfrecord_files = list(out.glob("reflex_test-train.tfrecord-*"))
+    assert len(tfrecord_files) >= 1
+
+    # Parse back: count examples in the shard.
+    ds = tf.data.TFRecordDataset([str(f) for f in tfrecord_files])
+    total = sum(1 for _ in ds)
+    assert total == 2  # 2 episodes
+
+
+def test_rlds_dataset_info_schema(tmp_path: Path) -> None:
+    pytest.importorskip("tensorflow")
+    jsonl = tmp_path / "input.jsonl"
+    _seed_jsonl(jsonl)
+    out = tmp_path / "out_rlds_info"
+
+    RLDSConverter().convert(input_jsonl=jsonl, output_dir=out)
+    info = json.loads((out / "dataset_info.json").read_text())
+    assert info["name"] == "reflex_curate_dataset"
+    assert info["splits"][0]["num_examples"] == 2
+    assert "steps" in info["features"]
+    assert "action" in info["features"]["steps"]["feature_spec"]
+
+
+def test_oxe_full_emits_embodiment_id(tmp_path: Path) -> None:
+    pytest.importorskip("tensorflow")
+    jsonl = tmp_path / "input.jsonl"
+    _seed_jsonl(jsonl)
+    out = tmp_path / "out_oxe"
+
+    converter = OpenXEmbodimentConverter(embodiment="franka")
+    result = converter.convert(input_jsonl=jsonl, output_dir=out)
+    assert result.episode_count == 2
+
+    info = json.loads((out / "dataset_info.json").read_text())
+    assert info["oxe_embodiment"] == "franka_emika_panda"
+    assert info["format_version"] == "openx-embodiment-1.0"
+    assert "embodiment_id" in info["features"]["episode_metadata"]["feature_spec"]
+
+
+# ── Video encoder (gated on [curate-video] extra) ──────────────────────────
+
+
+def test_video_encoder_handles_no_frames() -> None:
+    from reflex.curate.format_converters.shared.video_encoder import (
+        encode_frames_to_mp4,
+    )
+    with pytest.raises(ValueError, match="no frames"):
+        encode_frames_to_mp4(frames=[], output_path="/tmp/x.mp4")
+
+
+def test_video_encoder_decode_image_field_hash_only() -> None:
+    """64-char SHA-256 hex shouldn't be misinterpreted as base64 image."""
+    from reflex.curate.format_converters.shared.video_encoder import decode_image_field
+    sha256_hex = "0" * 64
+    assert decode_image_field(sha256_hex) is None
+    assert decode_image_field(None) is None
+    assert decode_image_field("") is None
+
+
+def test_video_encoder_collect_frames_skips_undecodable() -> None:
+    from reflex.curate.format_converters.shared.video_encoder import collect_frames_from_rows
+    rows = [
+        {"image_b64": None},
+        {"image_b64": "abc"},  # too short
+        {"image_b64": "0" * 64},  # hash-only
+    ]
+    assert collect_frames_from_rows(rows) == []
+
+
+def test_video_encoder_writes_mp4(tmp_path: Path) -> None:
+    """End-to-end: PNG frames in → mp4 out (requires [curate-video] + Pillow)."""
+    pytest.importorskip("imageio_ffmpeg")
+    Image = pytest.importorskip("PIL.Image")
+    from reflex.curate.format_converters.shared.video_encoder import (
+        encode_frames_to_mp4,
+    )
+    import io as _io
+
+    # Generate 5 RGB png frames
+    frames = []
+    for shade in (50, 80, 110, 140, 170):
+        img = Image.new("RGB", (32, 32), (shade, shade, shade))
+        buf = _io.BytesIO()
+        img.save(buf, format="PNG")
+        frames.append(buf.getvalue())
+
+    out = tmp_path / "test.mp4"
+    n_bytes = encode_frames_to_mp4(frames=frames, output_path=out, fps=10)
+    assert n_bytes > 0
+    assert out.exists()
+    assert out.stat().st_size == n_bytes
 
 
 # ── Empty / edge cases ─────────────────────────────────────────────────────

@@ -11,10 +11,12 @@ in dependency order:
 CLI surface:
     reflex curate convert <input.jsonl> --format <name> --output ./out/
 
-Phase 1 video encoding caveat (per LeRobot v3 spec): full mp4 video
-materialization requires ffmpeg-python + imageio-ffmpeg deps. v1 ships
-parquet + metadata; videos require the [curate-video] install extra
-(deferred until first customer with full-image data asks for it).
+Install extras gate the heavy deps:
+    [curate-hdf5]   h5py (~5 MB)               for HDF5 output
+    [curate-video]  imageio-ffmpeg + Pillow    for LeRobot v3 mp4 encoding
+                                               (without it, parquet + metadata
+                                               only; warning emitted)
+    [curate-rlds]   tensorflow + tfds (~80 MB) for RLDS + Open X-Embodiment
 
 Submodules:
     base                  abstract FormatConverter interface
