@@ -3703,6 +3703,305 @@ app.add_typer(validate_app, name="validate")
 app.add_typer(inspect_app, name="inspect")
 
 
+# ─── reflex traces {query, summary} ─────────────────────────────────────────
+# Customer trace archive (Phase 1.5 v1) per spec
+# features/01_serve/subfeatures/_ecosystem/customer-trace-archive/.
+# Operates on JSONL traces written by `reflex serve --record <dir>`.
+# Phase 1.5 ships: query (filter + export) + summary (aggregations).
+# Phase 2 deferred: parquet+DuckDB index for fast filter on million-record
+# archives + SQL surface for power users.
+traces_app = typer.Typer(
+    help="Searchable + summarizable view over recorded /act traces.",
+    no_args_is_help=True,
+)
+app.add_typer(traces_app, name="traces")
+
+
+def _default_trace_dirs() -> list[Path]:
+    """Same default order as `reflex inspect traces`."""
+    return [
+        Path.home() / ".cache" / "reflex" / "traces",
+        Path("/tmp/traces"),
+    ]
+
+
+def _resolve_output_format(output: Optional[str], explicit: Optional[str]) -> str:
+    """Pick output format: explicit --format > suffix on --output > 'table'."""
+    if explicit:
+        if explicit not in ("table", "json", "csv"):
+            raise typer.BadParameter(
+                f"--format must be 'table' / 'json' / 'csv', got {explicit!r}"
+            )
+        return explicit
+    if output:
+        suffix = Path(output).suffix.lower().lstrip(".")
+        if suffix in ("json", "csv"):
+            return suffix
+    return "table"
+
+
+@traces_app.command("query")
+def traces_query(
+    dir: Optional[str] = typer.Option(
+        None, "--dir",
+        help="Trace directory to scan. Defaults to ~/.cache/reflex/traces "
+             "and /tmp/traces.",
+    ),
+    since: Optional[str] = typer.Option(
+        None, "--since",
+        help="Only include records newer than this window: '7d', '24h', "
+             "'30m'. File mtime is used as the cheap pre-filter.",
+    ),
+    task: Optional[str] = typer.Option(
+        None, "--task",
+        help="Case-insensitive substring match against request.instruction.",
+    ),
+    status: str = typer.Option(
+        "any", "--status",
+        help="Filter by request status: 'any' (default) / 'success' / 'failed'. "
+             "'failed' = response had an `error` field (server-side error). "
+             "Episode-level task-success is not yet recorded; that lands in v2.",
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model",
+        help="Substring match against header.model_hash. Files with no match "
+             "are skipped entirely (cheap, runs once per file).",
+    ),
+    limit: Optional[int] = typer.Option(
+        None, "--limit",
+        help="Max records to emit. Default unbounded.",
+    ),
+    output: Optional[str] = typer.Option(
+        None, "--output",
+        help="Output file. Format auto-detected from suffix (.json / .csv) "
+             "unless --format is set. Default writes a Rich table to stdout.",
+    ),
+    format: Optional[str] = typer.Option(
+        None, "--format",
+        help="Output format override: 'table' / 'json' / 'csv'. Default "
+             "auto-detect from --output suffix.",
+    ),
+) -> None:
+    """Filter + export recorded /act traces. Composes with Pro-tier
+    record-replay; runs locally so customer data stays on-prem."""
+    from reflex.traces.archive import (
+        TraceFilter,
+        query_traces,
+    )
+    from typing import cast
+
+    if status not in ("any", "success", "failed"):
+        raise typer.BadParameter(
+            f"--status must be 'any' / 'success' / 'failed', got {status!r}"
+        )
+
+    dirs = [Path(dir)] if dir else _default_trace_dirs()
+    flt = TraceFilter(
+        since=since,
+        task=task,
+        status=cast("Any", status),  # narrow after validation
+        model=model,
+        limit=limit,
+    )
+    try:
+        records = query_traces(dirs, filter_=flt)
+    except ValueError as exc:
+        console.print(f"[red]Invalid filter: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if not records:
+        console.print("[dim]No traces match the filter.[/dim]")
+        return
+
+    fmt = _resolve_output_format(output, format)
+
+    if fmt == "json":
+        import json as _json
+        rows = [
+            {
+                "file": str(r.file),
+                "seq": r.seq,
+                "timestamp": r.timestamp,
+                "instruction": r.instruction,
+                "latency_ms": r.latency_ms,
+                "status": "failed" if r.is_failed else "success",
+                "error": r.error,
+            }
+            for r in records
+        ]
+        text = _json.dumps(rows, indent=2)
+        if output:
+            Path(output).write_text(text + "\n", encoding="utf-8")
+            console.print(f"Wrote {len(rows)} record(s) to {output}")
+        else:
+            print(text)
+        return
+
+    if fmt == "csv":
+        import csv as _csv
+        import io as _io
+        buf = _io.StringIO()
+        w = _csv.writer(buf)
+        w.writerow([
+            "file", "seq", "timestamp", "instruction",
+            "latency_ms", "status", "error_reason",
+        ])
+        for r in records:
+            err_reason = (
+                (r.error or {}).get("reason", "") if r.error else ""
+            )
+            w.writerow([
+                str(r.file), r.seq, r.timestamp, r.instruction,
+                r.latency_ms,
+                "failed" if r.is_failed else "success",
+                err_reason,
+            ])
+        text = buf.getvalue()
+        if output:
+            Path(output).write_text(text, encoding="utf-8")
+            console.print(f"Wrote {len(records)} record(s) to {output}")
+        else:
+            print(text, end="")
+        return
+
+    # Default: table to stdout
+    table = Table(title=f"Trace records ({len(records)} match)")
+    table.add_column("Timestamp")
+    table.add_column("Status")
+    table.add_column("Latency (ms)")
+    table.add_column("Task")
+    table.add_column("File")
+    for r in records:
+        table.add_row(
+            r.timestamp,
+            "[red]failed[/red]" if r.is_failed else "[green]success[/green]",
+            f"{r.latency_ms:.1f}",
+            (r.instruction[:50] + "...") if len(r.instruction) > 50 else r.instruction,
+            r.file.name,
+        )
+    console.print(table)
+
+
+@traces_app.command("summary")
+def traces_summary(
+    dir: Optional[str] = typer.Option(
+        None, "--dir",
+        help="Trace directory to scan. Defaults to ~/.cache/reflex/traces "
+             "and /tmp/traces.",
+    ),
+    since: Optional[str] = typer.Option(
+        None, "--since",
+        help="Only include records newer than this window: '7d', '24h', '30m'.",
+    ),
+    task: Optional[str] = typer.Option(
+        None, "--task",
+        help="Pre-filter by task substring before grouping.",
+    ),
+    status: str = typer.Option(
+        "any", "--status",
+        help="Pre-filter by status before grouping.",
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model",
+        help="Pre-filter by model_hash substring before grouping.",
+    ),
+    by: str = typer.Option(
+        "task", "--by",
+        help="Group records by this dimension: 'task' (default) / 'model' / "
+             "'day'. 'model' uses model_hash from the trace filename.",
+    ),
+    output: Optional[str] = typer.Option(
+        None, "--output",
+        help="Output file. Format auto-detected from suffix (.json / .csv) "
+             "unless --format is set. Default writes a Rich table.",
+    ),
+    format: Optional[str] = typer.Option(
+        None, "--format",
+        help="Output format override: 'table' / 'json' / 'csv'.",
+    ),
+) -> None:
+    """Aggregate trace records by task, model, or day. Each bucket gets
+    count, success_rate, latency p50/p95/p99/max."""
+    from reflex.traces.archive import (
+        TraceFilter,
+        summarize_traces,
+    )
+    from typing import cast
+
+    if status not in ("any", "success", "failed"):
+        raise typer.BadParameter(
+            f"--status must be 'any' / 'success' / 'failed', got {status!r}"
+        )
+    if by not in ("task", "model", "day"):
+        raise typer.BadParameter(
+            f"--by must be 'task' / 'model' / 'day', got {by!r}"
+        )
+
+    dirs = [Path(dir)] if dir else _default_trace_dirs()
+    flt = TraceFilter(since=since, task=task, status=cast("Any", status), model=model)
+    try:
+        summaries = summarize_traces(
+            dirs, filter_=flt, by=cast("Any", by),
+        )
+    except ValueError as exc:
+        console.print(f"[red]Invalid filter: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if not summaries:
+        console.print("[dim]No traces match the filter.[/dim]")
+        return
+
+    fmt = _resolve_output_format(output, format)
+
+    if fmt == "json":
+        import json as _json
+        rows = [s.as_dict() for s in summaries]
+        text = _json.dumps(rows, indent=2)
+        if output:
+            Path(output).write_text(text + "\n", encoding="utf-8")
+            console.print(f"Wrote {len(rows)} summary buckets to {output}")
+        else:
+            print(text)
+        return
+
+    if fmt == "csv":
+        import csv as _csv
+        import io as _io
+        buf = _io.StringIO()
+        w = _csv.DictWriter(buf, fieldnames=list(summaries[0].as_dict().keys()))
+        w.writeheader()
+        for s in summaries:
+            w.writerow(s.as_dict())
+        text = buf.getvalue()
+        if output:
+            Path(output).write_text(text, encoding="utf-8")
+            console.print(f"Wrote {len(summaries)} summary buckets to {output}")
+        else:
+            print(text, end="")
+        return
+
+    # Default: table
+    table = Table(title=f"Trace summary by {by} ({len(summaries)} bucket(s))")
+    table.add_column(by.capitalize(), max_width=60)
+    table.add_column("Count")
+    table.add_column("Success rate")
+    table.add_column("p50 ms")
+    table.add_column("p95 ms")
+    table.add_column("p99 ms")
+    table.add_column("max ms")
+    for s in summaries:
+        table.add_row(
+            s.bucket,
+            str(s.count),
+            f"{s.success_rate:.1%}",
+            f"{s.latency_p50_ms:.1f}",
+            f"{s.latency_p95_ms:.1f}",
+            f"{s.latency_p99_ms:.1f}",
+            f"{s.latency_max_ms:.1f}",
+        )
+    console.print(table)
+
+
 # ─── reflex pro {activate, status, deactivate} ──────────────────────────────
 # Customer-facing Pro tier commands. Activation flow lives in
 # src/reflex/pro/activate.py; status reads ~/.reflex/pro.license; deactivate
