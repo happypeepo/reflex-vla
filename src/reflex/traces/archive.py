@@ -139,8 +139,11 @@ class TraceFilter:
 # ---------------------------------------------------------------------------
 
 
-def _open_trace(file_path: Path):
-    """Open a .jsonl or .jsonl.gz file for text reading."""
+def _open_trace(file_path: Path) -> Any:
+    """Open a .jsonl or .jsonl.gz file for text reading. Returns either a
+    text file handle (`open(...)`) or a gzip-decompressed text reader; both
+    behave as context managers + line iterators. Typed as Any since gzip's
+    text-mode return is a `_typeshed.SupportsReadlineN` not a TextIO."""
     if file_path.suffix == ".gz":
         return gzip.open(file_path, "rt", encoding="utf-8")
     return open(file_path, "rt", encoding="utf-8")
