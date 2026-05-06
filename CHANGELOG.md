@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.9.3 — 2026-05-07
+
+**`reflex doctor` Blackwell guard.** Loud check that catches the trap rob (RTX 5090) hit for 2 weeks: customers running Blackwell hardware on `onnxruntime-gpu < 1.25.1` will see an explicit failure row in `reflex doctor` output telling them to upgrade ORT. Previously the customer had to discover this via segfault.
+
+### Added
+
+- **Blackwell sm_120 support row in `reflex doctor`**:
+  - **Fires only on Blackwell hardware** (RTX 50-series, RTX PRO Blackwell, B200, GB200) — uses existing `reflex.runtime.server._gpu_is_blackwell()` so no new detection logic. Silent on non-Blackwell.
+  - **❌ FAIL** when ORT < 1.25.1: explicit upgrade message with exact pip command (`pip install -U 'onnxruntime-gpu>=1.25.1'`) + reference to PR #27278 + reason ("predates Blackwell support; will SEGFAULT at session-init").
+  - **✅ PASS** when ORT >= 1.25.1: confirms support active + flags live caveat (open ORT issue #27621 about silent threading deadlock on sm_120 with PTX JIT + GIL; reflex's single-thread inference doesn't trigger but multi-threaded customers should monitor).
+- 7 unit tests in `tests/test_doctor_blackwell_guard.py` covering version-comparison logic (pre-1.25.0, 1.25.0, 1.25.1, post-1.25.1, dev/rc/post pre-release suffixes) + GPU-name pattern matching (real Blackwell SKUs match; Hopper/Ada/Ampere/Jetson don't).
+
+Per CLAUDE.md "no silent fallbacks that paper over errors" — Blackwell users now see the upgrade path immediately at `reflex doctor` time, not 2 weeks later via debugging a segfault.
+
 ## v0.9.2 — 2026-05-07
 
 **Blackwell (RTX 5090 / B200 / GB200) support unblocked via ORT 1.25.1 bump.**

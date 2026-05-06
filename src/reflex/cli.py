@@ -2772,6 +2772,42 @@ def doctor(
             "available — reflex serve will auto-prefer this" if has_trt else
             "NOT available — TRT FP16 disabled, will use CUDA EP",
         )
+
+        # ─── Blackwell guard ──────────────────────────────────────────
+        # Background: ORT 1.25.0 (2026-04-20) shipped Blackwell sm_120
+        # kernels via PR #27278; 1.25.1 (2026-04-27) is current stable.
+        # Earlier 1.23/1.24 regressed sm_120 (cudaErrorNoKernelImageForDevice).
+        # Customers running Blackwell hardware on ORT < 1.25.1 hit a hard
+        # segfault at session-init that is NOT a reflex bug. Surfaced
+        # 2026-04-28 by tester (rob, RTX 5090); cost 2 weeks of his time
+        # before we tracked the upstream fix.
+        # This check fails LOUD per CLAUDE.md "no silent fallbacks" so
+        # future Blackwell customers see the upgrade path immediately.
+        from reflex.runtime.server import _gpu_is_blackwell
+        if _gpu_is_blackwell():
+            from packaging.version import Version
+            installed = Version(ort.__version__)
+            min_blackwell_safe = Version("1.25.1")
+            if installed < min_blackwell_safe:
+                add(
+                    "  → Blackwell sm_120 support",
+                    False,
+                    f"❌ ORT {ort.__version__} predates Blackwell support. "
+                    f"Upgrade to >=1.25.1 (1.25.0 added sm_120 kernels via "
+                    f"PR #27278). Reflex on this hardware will SEGFAULT at "
+                    f"session-init until upgraded. Run: "
+                    f"`pip install -U 'onnxruntime-gpu>=1.25.1'`",
+                )
+            else:
+                add(
+                    "  → Blackwell sm_120 support",
+                    True,
+                    f"ORT {ort.__version__} ≥ 1.25.1 — Blackwell sm_120 "
+                    f"kernels available. Live caveat: open ORT issue #27621 "
+                    f"(silent threading deadlock on sm_120 with PTX JIT + "
+                    f"GIL); reflex's single-thread inference path doesn't "
+                    f"trigger it, but multi-threaded customers should monitor.",
+                )
     except ImportError:
         add(
             "ONNX Runtime",
