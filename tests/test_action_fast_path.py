@@ -176,6 +176,21 @@ def test_observe_after_max_skips_resumes_caching():
     assert fp.should_skip() is True
 
 
+def test_expert_calls_increments_when_disabled():
+    """expert_calls counter increments per observe regardless of
+    enabled state. Caught 2026-05-07 production smoke (Run A reported
+    expert_calls=0 because observe() early-returned when enabled=False
+    even though the expert had run on each call). Fixed via increment-
+    before-enabled-check; this test guards against regression."""
+    fp = ActionFastPath(threshold=0.05, max_skips=3, enabled=False)
+    fp.observe(_chunk(0.0))
+    fp.observe(_chunk(0.0))
+    fp.observe(_chunk(0.0))
+    assert fp.stats.expert_calls == 3
+    # Disabled mode never increments skip_count
+    assert fp.stats.skip_count == 0
+
+
 def test_skip_then_dissimilar_resets_cleanly():
     fp = ActionFastPath(threshold=0.05, max_skips=3)
     fp.observe(_chunk(0.0))

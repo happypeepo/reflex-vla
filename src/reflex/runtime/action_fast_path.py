@@ -160,11 +160,17 @@ class ActionFastPath:
         similar, the next call may find the call-after-next similar to
         THIS one.
         """
+        # Increment expert_calls regardless of enabled state — caller has
+        # always run the expert to produce these actions, and downstream
+        # observability needs a true per-call counter (not "calls when
+        # fast-path-enabled"). Caught 2026-05-07 by production smoke
+        # (Run A reported expert_calls=0 even though the expert ran 20x).
+        self._stats.expert_calls += 1
         if not self._enabled:
             return
         if self._last_actions is None or actions.shape != self._last_actions.shape:
             # No prior cache OR shape change → can't compare; reset.
-            self._stats.expert_calls += 1
+            # expert_calls already incremented above per-call.
             self._consecutive_skips = 0
             self._stats.last_distance = float("nan")
             self._last_actions = actions.copy()
@@ -172,7 +178,7 @@ class ActionFastPath:
 
         distance = float(np.linalg.norm(actions - self._last_actions))
         self._stats.last_distance = distance
-        self._stats.expert_calls += 1
+        # expert_calls already incremented above per-call.
 
         if distance < self._threshold and self._consecutive_skips < self._max_skips:
             # Similar enough → next call can skip. Don't update cache —
