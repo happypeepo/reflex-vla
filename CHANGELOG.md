@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.9.4 — 2026-05-07
+
+**`reflex doctor` expanded with 4 silent-failure guards.** Customers no longer hit silent failures at deploy time for any of these traps:
+
+### Added
+
+- **Multi-GPU mixed-architecture warning.** If `nvidia-smi` reports 2+ GPUs of different generations (e.g. 1× H100 + 1× RTX 5090), surface a row warning that ORT only uses `CUDA_VISIBLE_DEVICES[0]` and switching GPUs at runtime will silently fail with arch-mismatched kernels.
+- **Jetson JetPack target check.** Detects Jetson via `/etc/nv_tegra_release`, parses JetPack version (R35 / R36 / etc.). R35 ships CUDA 11.4 → fails ORT 1.20+'s CUDA 12.x requirement (silent CPU fallback). R36+ passes. Loud message tells JetPack 5.x customers to upgrade or use `[serve,onnx]` CPU extra.
+- **CUDA driver vs cuDNN version skew check.** cuDNN 9.5+ requires NVIDIA driver R555+; cuDNN 9.0-9.4 requires R550+. Customer pinning old driver via `apt-hold` + bundled cuDNN 9.5 silently fails at first inference call. Guard reads `nvidia-smi --query-gpu=driver_version` + `importlib.metadata.version('nvidia-cudnn-cu12')` and surfaces the gap.
+- **ORT-TRT EP empirical session test.** `available_providers` says the lib loaded — does NOT confirm session-init succeeds. The v0.7 install gap (caught 2026-04-29 v07-install-validation experiment) is exactly this: TRT EP available + session falls back to CUDA EP because `libnvinfer.so.10` isn't on dlopen path. Customer silently loses ~5× perf. Guard creates a tiny stub ONNX model + forces TRT EP + checks `sess.get_providers()` — if TRT EP is missing from active list, surface the loadchain breakage.
+
+### Tests
+
+- 35 new unit tests in `tests/test_doctor_guards.py` covering arch detection (16 GPU SKUs across Blackwell/Hopper/Ada/Ampere/Orin/unknown), Jetson version parsing (R35 / R36 / future / malformed), CUDA driver vs cuDNN version logic (cuDNN 9.0-9.10, drivers R550/R555).
+- All 4 guards gracefully skip on non-applicable systems (no NVIDIA: returns silently; no Jetson: returns silently; etc.).
+
+Per CLAUDE.md "no silent fallbacks that paper over errors" — every customer-facing silent-failure mode in our matrix now surfaces a specific row with a concrete remediation command at `reflex doctor` time.
+
 ## v0.9.3 — 2026-05-07
 
 **`reflex doctor` Blackwell guard.** Loud check that catches the trap rob (RTX 5090) hit for 2 weeks: customers running Blackwell hardware on `onnxruntime-gpu < 1.25.1` will see an explicit failure row in `reflex doctor` output telling them to upgrade ORT. Previously the customer had to discover this via segfault.

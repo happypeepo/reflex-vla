@@ -2747,6 +2747,141 @@ def doctor(
     except ImportError as e:
         add("torch + CUDA", False, f"torch not installed: {e}")
 
+    # ─── Multi-GPU mixed-arch guard ─────────────────────────────────────
+    # If the customer has 2+ NVIDIA GPUs of different architectures (e.g.
+    # 1× A100 + 1× RTX 5090), ORT only uses CUDA_VISIBLE_DEVICES[0] by
+    # default. Surface the mix loudly so they don't get a working ORT
+    # session on GPU 0 + silent kernel-image failure if they ever target
+    # GPU 1. Quiet on single-GPU + uniform-multi-GPU systems.
+    try:
+        import subprocess as _sub
+        proc = _sub.run(
+            ["nvidia-smi", "--query-gpu=index,name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=3.0,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            lines = [
+                ln.strip() for ln in proc.stdout.strip().splitlines() if ln.strip()
+            ]
+            if len(lines) >= 2:
+                # Crude arch detection — same compute-cap if same generation.
+                # We don't have nvidia-ml-py; use name-substring heuristics.
+                def _arch_from_name(name: str) -> str:
+                    n = name.lower()
+                    if any(p in n for p in ("rtx 50", "rtx pro 60", "blackwell", "b200", "gb200")):
+                        return "blackwell"
+                    if any(p in n for p in ("h100", "h200", "hopper")):
+                        return "hopper"
+                    if any(p in n for p in ("rtx 40", "l4", "l40", "ada")):
+                        return "ada"
+                    if any(p in n for p in ("a100", "a10g", "a40", "ampere", "rtx 30")):
+                        return "ampere"
+                    if "orin" in n or "tegra" in n:
+                        return "orin"
+                    return "unknown"
+
+                names = [ln.split(",", 1)[1].strip() for ln in lines]
+                archs = {_arch_from_name(n) for n in names}
+                archs.discard("unknown")
+                if len(archs) > 1:
+                    add(
+                        "  → multi-GPU arch consistency",
+                        False,
+                        f"⚠ Mixed GPU architectures: {sorted(archs)} ({len(lines)} GPUs). "
+                        f"ORT uses CUDA_VISIBLE_DEVICES[0] only by default. "
+                        f"If you target GPU 1 via CUDA_VISIBLE_DEVICES, kernels "
+                        f"compiled for GPU 0's arch will silently fail.",
+                    )
+    except (FileNotFoundError, ImportError, OSError):
+        pass
+
+    # ─── Jetson JetPack guard ───────────────────────────────────────────
+    # Jetson devices ship CUDA + cuDNN baked into JetPack at the OS level.
+    # Customers running ORT 1.25+ on JetPack 5.x (CUDA 11.4) will silently
+    # fall to CPU because ORT's bundled CUDA 12 EP can't find compatible
+    # libs. Surface JetPack version + ORT compatibility loudly.
+    try:
+        from pathlib import Path as _P
+        jetson_release = _P("/etc/nv_tegra_release")
+        if jetson_release.exists():
+            content = jetson_release.read_text(errors="ignore")
+            # Format example: "# R36 (release), REVISION: 4.0, GCID: ..."
+            jetpack_major = "unknown"
+            for line in content.splitlines():
+                if line.startswith("# R"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        jetpack_major = parts[1].lstrip("R")
+                    break
+            # JetPack R36+ ships CUDA 12.x; R35 ships CUDA 11.4
+            # ORT 1.20+ requires CUDA 12.x → R36+ is required for GPU EP.
+            try:
+                jp_int = int(jetpack_major)
+            except (TypeError, ValueError):
+                jp_int = 0
+            if jp_int and jp_int < 36:
+                add(
+                    "  → Jetson JetPack target",
+                    False,
+                    f"❌ JetPack R{jetpack_major} ships CUDA 11.4. ORT 1.20+ "
+                    f"requires CUDA 12.x → CUDAExecutionProvider will silently "
+                    f"fall to CPU. Upgrade to JetPack R36+ (Orin) or use "
+                    f"reflex-vla[serve,onnx] for CPU-only inference.",
+                )
+            elif jp_int >= 36:
+                add(
+                    "  → Jetson JetPack target",
+                    True,
+                    f"JetPack R{jetpack_major} (CUDA 12.x compatible).",
+                )
+    except (OSError, ImportError):
+        pass
+
+    # ─── CUDA driver vs cuDNN version skew guard ────────────────────────
+    # cuDNN minor versions have driver minimum requirements (cuDNN 9.5
+    # needs NVIDIA driver R555+; cuDNN 9.0 needs R550+). Mismatch causes
+    # silent kernel failures at first invocation, not at session-init.
+    # Catches: customer pinned old driver via apt-hold, used Reflex's
+    # bundled cuDNN at the wrong system driver level.
+    try:
+        import subprocess as _sub
+        nv_proc = _sub.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=3.0,
+        )
+        if nv_proc.returncode == 0:
+            driver_str = (nv_proc.stdout or "").strip().split("\n")[0]
+            try:
+                driver_major = int(driver_str.split(".")[0])
+            except (ValueError, IndexError):
+                driver_major = 0
+            try:
+                from importlib.metadata import version as _v
+                cudnn_v = _v("nvidia-cudnn-cu12")
+                cudnn_minor = int(cudnn_v.split(".")[1]) if cudnn_v else 0
+                # cuDNN 9.5 needs driver R555+; cuDNN 9.0 needs R550+
+                min_driver = 555 if cudnn_minor >= 5 else 550
+                if driver_major and driver_major < min_driver:
+                    add(
+                        "  → CUDA driver vs cuDNN",
+                        False,
+                        f"❌ NVIDIA driver R{driver_major} predates cuDNN "
+                        f"{cudnn_v} requirement (needs R{min_driver}+). "
+                        f"Kernels will silently fail at first inference call. "
+                        f"Upgrade driver: `sudo apt install nvidia-driver-{min_driver}` "
+                        f"or use cuDNN <9.5 (`pip install 'nvidia-cudnn-cu12<9.5'`).",
+                    )
+                elif driver_major:
+                    add(
+                        "  → CUDA driver vs cuDNN",
+                        True,
+                        f"driver R{driver_major} OK for cuDNN {cudnn_v}",
+                    )
+            except Exception:  # noqa: BLE001 — best-effort probe
+                pass
+    except (FileNotFoundError, ImportError, OSError):
+        pass
+
     # ONNX Runtime + execution providers
     try:
         import onnxruntime as ort
@@ -2772,6 +2907,78 @@ def doctor(
             "available — reflex serve will auto-prefer this" if has_trt else
             "NOT available — TRT FP16 disabled, will use CUDA EP",
         )
+
+        # ─── ORT-TRT EP empirical session test ───────────────────────────
+        # `available_providers` says the lib is loaded — it does NOT confirm
+        # session-init will succeed with that provider. The v0.7 install gap
+        # (caught 2026-04-29 by the v07-install-validation experiment + ADR
+        # 2026-04-29-ort-trt-ep-first-class-support) is exactly this: TRT EP
+        # registered but `InferenceSession(providers=[TRT EP])` falls back to
+        # CUDA because libnvinfer.so.10 isn't in the dlopen path. Customers
+        # silently lose the 5.55× perf win.
+        # Empirical fix: try creating a session with TRT EP forced + check
+        # active providers. Only runs when TRT EP is "available" per above.
+        if has_trt:
+            try:
+                import os as _os
+                import tempfile as _tmp
+                import onnx as _onnx
+                from onnx import TensorProto, helper
+
+                # Build a tiny stub model (1x1 add) — small enough that
+                # ORT session creation is the bottleneck, not graph compile.
+                node = helper.make_node("Add", inputs=["A", "B"], outputs=["C"])
+                graph = helper.make_graph(
+                    [node],
+                    "trt_ep_smoke",
+                    [
+                        helper.make_tensor_value_info("A", TensorProto.FLOAT, [1]),
+                        helper.make_tensor_value_info("B", TensorProto.FLOAT, [1]),
+                    ],
+                    [helper.make_tensor_value_info("C", TensorProto.FLOAT, [1])],
+                )
+                model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 19)])
+                model.ir_version = 9
+
+                with _tmp.NamedTemporaryFile(suffix=".onnx", delete=False) as _f:
+                    _f.write(model.SerializeToString())
+                    stub_path = _f.name
+
+                try:
+                    # Force-prefer TRT EP. If session creation succeeds AND
+                    # active providers include TRT EP, the loadchain is fine.
+                    sess = ort.InferenceSession(
+                        stub_path,
+                        providers=["TensorrtExecutionProvider", "CUDAExecutionProvider"],
+                    )
+                    active = sess.get_providers()
+                    if "TensorrtExecutionProvider" in active:
+                        add(
+                            "  → TRT EP empirical load",
+                            True,
+                            "session-init with TRT EP succeeds; production "
+                            "serve will get the 5.55× win.",
+                        )
+                    else:
+                        add(
+                            "  → TRT EP empirical load",
+                            False,
+                            f"❌ TRT EP listed available but session falls back "
+                            f"to {active}. Likely libnvinfer.so.10 not on dlopen "
+                            f"path. Fix: `pip install -U 'tensorrt>=10.0,<11'` + "
+                            f"restart shell. Customer silently loses ~5× perf "
+                            f"otherwise. See ADR 2026-04-29-ort-trt-ep-first-class.",
+                        )
+                finally:
+                    _os.unlink(stub_path)
+            except Exception as _exc:  # noqa: BLE001
+                add(
+                    "  → TRT EP empirical load",
+                    False,
+                    f"⚠ session-init test failed: {type(_exc).__name__}: {_exc}. "
+                    f"Customer's TRT EP is likely broken; serve will silently "
+                    f"fall to CUDA EP.",
+                )
 
         # ─── Blackwell guard ──────────────────────────────────────────
         # Background: ORT 1.25.0 (2026-04-20) shipped Blackwell sm_120
