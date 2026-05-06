@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.9.5 — 2026-05-07
+
+**CLI cut pass — `reflex --help` shrinks 22% (18 → 14 visible top-level verbs); `reflex inspect --help` shrinks 60% (5 → 2 visible).** No commands deleted; cluttered/redundant ones moved to `hidden=True` in their typer registration. All still callable directly for power-user scripts; just removed from the discovery surface.
+
+### Hidden (still callable)
+
+- **`inspect doctor`** — pure duplicate of top-level `reflex doctor` (cross-registered "for completeness" but added redundant entry to --help)
+- **`inspect targets`** — lists hardware profiles. Used once during install, never after
+- **`inspect guard`** — dumps shipped safety config. Niche diagnostic
+- **`inspect bench`** — internal-only latency microbench (`customer_signal: internal` per spec)
+- **`config show/set`** — config schema is a stub (no real config knobs surfaced via this CLI yet; verb-noun ADR scopes config-driven workflows for Phase 2)
+- **`bench-game`** — SO-ARM 100 hardware-specific bench rigs (~3 customers globally)
+- **`calibrate`** — SO-ARM 100 calibration (corners/surface/tap)
+- **`status`** — list running serves; `ps aux | grep reflex` does the same
+
+### Customer-facing impact
+
+Customer's `reflex --help` now shows 11 daily-driver verbs + Pro/contribute. Discord onboarding becomes "here are the 11 verbs you actually need" instead of "good luck navigating 18." Power-user invocations (`reflex inspect doctor`, `reflex calibrate so100 corners`, etc.) still work — only the discovery surface changed.
+
 ## v0.9.4 — 2026-05-07
 
 **`reflex doctor` expanded with 4 silent-failure guards.** Customers no longer hit silent failures at deploy time for any of these traps:

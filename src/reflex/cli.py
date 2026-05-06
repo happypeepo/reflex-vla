@@ -3828,14 +3828,28 @@ inspect_app = typer.Typer(
 
 # Cross-register existing functions under the new verb-noun paths.
 # Same callable, two surface names: old hidden, new visible.
+#
+# v0.9.5 (2026-05-07) CLI cut pass: hidden=True on cluttered/redundant
+# inspect commands per the surface-audit. Each stays callable directly
+# (`reflex inspect bench`, etc. still works); just removed from --help.
+# Reduces customer cognitive load on `reflex inspect --help` from 5 → 2.
 models_app.command("export")(export)
 validate_app.command("dataset")(validate_dataset)
 validate_app.command("export")(validate)
-inspect_app.command("bench")(benchmark_cmd)
-inspect_app.command("replay")(replay)
-inspect_app.command("targets")(targets)
-inspect_app.command("guard")(guard)
-inspect_app.command("doctor")(doctor)  # also expose under inspect for completeness; doctor stays top-level too
+# inspect bench: internal-only latency microbench (`customer_signal: internal`
+# per spec). Customers don't run benches. Hidden 2026-05-07.
+inspect_app.command("bench", hidden=True)(benchmark_cmd)
+inspect_app.command("replay")(replay)  # legitimate trace replay tool
+# inspect targets: lists hardware profiles. Used once during install,
+# never after. Hidden 2026-05-07.
+inspect_app.command("targets", hidden=True)(targets)
+# inspect guard: dumps shipped safety config. Niche diagnostic;
+# fired ~twice in entire experiment history. Hidden 2026-05-07.
+inspect_app.command("guard", hidden=True)(guard)
+# inspect doctor: pure duplicate of top-level `reflex doctor`.
+# Cross-registration was for "completeness" but adds a redundant entry
+# to --help. Hidden 2026-05-07; top-level `doctor` is the canonical path.
+inspect_app.command("doctor", hidden=True)(doctor)
 
 
 @inspect_app.command("traces")
@@ -4444,7 +4458,11 @@ def chat(
 
 
 config_app = typer.Typer(name="config", help="Show + manage reflex configuration.", no_args_is_help=True)
-app.add_typer(config_app, name="config")
+# Hidden 2026-05-07: config schema is currently a stub (no real
+# config knobs surfaced through this CLI yet — the verb-noun ADR
+# scopes config-driven workflows for Phase 2). Premature top-level
+# verb. Keep callable for any power-user scripts.
+app.add_typer(config_app, name="config", hidden=True)
 
 
 # ─── reflex contribute {opt-in,opt-out,revoke,status,info} ──────────────────
@@ -4463,7 +4481,10 @@ calibrate_app = typer.Typer(
     help="Calibrate a physical robot arm (joint zeroing + workspace bounds).",
     no_args_is_help=True,
 )
-app.add_typer(calibrate_app, name="calibrate")
+# Hidden 2026-05-07: SO-ARM 100 hardware-specific (corners/surface/tap).
+# Customers without SO-100 hardware (~95% of the user base) don't need
+# to see this. Stays callable directly for SO-100 customers.
+app.add_typer(calibrate_app, name="calibrate", hidden=True)
 
 so100_calibrate_app = typer.Typer(
     name="so100",
@@ -4521,7 +4542,11 @@ bench_game_app = typer.Typer(
     help="Reflex bench games — real-arm regression-test rigs (tablet tap, etc.).",
     no_args_is_help=True,
 )
-app.add_typer(bench_game_app, name="bench-game")
+# Hidden 2026-05-07: real-arm bench games vendored from auto_soarm.
+# SO-100 + tablet-specific rig; ~3 customers globally. Hidden from
+# default --help to reduce surface clutter; SO-100 customers can still
+# invoke directly.
+app.add_typer(bench_game_app, name="bench-game", hidden=True)
 
 circle_lr_app = typer.Typer(
     name="circle_lr",
@@ -4677,9 +4702,13 @@ def curate_convert(
             console.print(f"  - {w}")
 
 
-@app.command()
+@app.command(hidden=True)
 def status() -> None:
-    """List running reflex serve processes (PID, port, command)."""
+    """List running reflex serve processes (PID, port, command).
+
+    Hidden 2026-05-07: niche diagnostic; `ps aux | grep reflex`
+    accomplishes the same thing. Power-users can still invoke directly.
+    """
     import re
     import subprocess as _sp
     try:

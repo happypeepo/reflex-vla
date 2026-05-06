@@ -207,9 +207,13 @@ reflex doctor           # diagnose env + GPU + per-deploy issues
 reflex models {list, pull, info, export}    # curated registry + lifecycle
 reflex train  {finetune, distill}           # training operations
 reflex validate {dataset, export}           # pre-flight checks
-reflex inspect {bench, replay, targets, guard, doctor}   # diagnostics + forensics
+reflex inspect {replay, traces}             # forensic tools (legacy diagnostics: --advanced)
 reflex traces {query, summary}              # search + aggregate recorded /act traces
+reflex pro     {activate, status, deactivate}   # Pro tier license
+reflex contribute  {opt-in, opt-out, status}    # Curate data contribution
 ```
+
+11 visible verbs. 8 advanced/SO-100/internal commands stay callable directly (config, calibrate, bench-game, status, inspect bench/targets/guard/doctor) but hidden from `--help` to reduce cognitive load. Power-users can still invoke them; they just don't crowd the discovery surface.
 
 Hidden legacy commands (`export`, `bench`, `replay`, etc.) stay callable for one release as alias bridges. Removed in v0.3.
 
