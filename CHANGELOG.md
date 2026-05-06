@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.9.2 — 2026-05-07
+
+**Blackwell (RTX 5090 / B200 / GB200) support unblocked via ORT 1.25.1 bump.**
+
+### Fixed
+
+- **`onnxruntime-gpu` pin bumped from `>=1.20,<1.24` to `>=1.25.1`** in both `[gpu]` and `[gpu-min]` extras. ORT 1.25.0 (2026-04-20) shipped Blackwell sm_120 kernels via PR [#27278](https://github.com/microsoft/onnxruntime/pull/27278) (CUDA arch family codes `100f`/`110f`/`120f`); 1.25.1 (2026-04-27) is current stable. Earlier 1.23/1.24 regressed sm_120 (`cudaErrorNoKernelImageForDevice` on Blackwell). The ceiling `<1.24` was blocking customers from picking up the working release.
+- Bumped `nvidia-cudnn-cu12>=9.5` and `nvidia-cublas-cu12>=12.6` floors to match ORT 1.25's documented build requirements (CUDA SDK 12.8+, cuDNN 9.5+ per maintainer guidance in #26181).
+
+### Live caveat
+
+Open ORT issue [#27621](https://github.com/microsoft/onnxruntime/issues/27621) tracks a silent threading deadlock on sm_120 (PTX JIT + GIL interaction). Reflex doesn't yet exercise the multi-threaded `InferenceSession.run()` codepath that triggers it (single-server, single-request through PolicyRuntime). Will smoke-validate on RTX 5090 hardware before declaring Blackwell tier "production-ready" in the README. Customers using `--max-batch >1` or running multiple `reflex serve` processes on a single GPU should monitor.
+
+### Context — why this took 2 weeks
+
+ADR `2026-04-29-ort-trt-ep-first-class-support.md` (written 9 days AFTER ORT 1.25.0 dropped) assumed Blackwell support would arrive in some future ORT 1.21+. We didn't track ORT releases. Tester `not rob` (RTX 5090) hit segfaults from 2026-04-28 → 2026-05-07 because reflex was pinning `onnxruntime-gpu<1.24`. The fix: drop the ceiling, bump the floor.
+
 ## v0.9.1 — 2026-05-07
 
 **Fix: stale `__version__` constant.** v0.9.0's `pyproject.toml` was bumped to 0.9.0 but `src/reflex/__init__.py` still hardcoded `__version__ = "0.8.0"`. The wheel metadata (`pip show`) correctly reported 0.9.0 — only the human-readable upgrade-check nag + `reflex --version` print misreported. No functional bug; all v0.9.0 features (action-similarity-fast-path, customer-trace-archive, uncertainty scoring) shipped working code.

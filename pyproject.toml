@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "reflex-vla"
-version = "0.9.1"
+version = "0.9.2"
 description = "Deploy any VLA model to any edge hardware. Now with reflex chat — natural-language CLI."
 readme = "README.md"
 license = "BUSL-1.1"
@@ -67,22 +67,31 @@ onnx = ["onnxruntime>=1.17.0"]
 # and ORT silently falls back to CUDA EP — losing the 5.55x. See ADR
 # 2026-04-29-ort-trt-ep-first-class-support.md. Adds ~2 GB to install.
 #
+# v0.9.2 (2026-05-07): bumped onnxruntime-gpu floor to 1.25.1 + dropped the
+# <1.24 ceiling. ORT 1.25.0 (2026-04-20) shipped Blackwell sm_120 kernels
+# via PR #27278 (CUDA arch family codes 100f/110f/120f) — first PyPI wheels
+# with usable RTX 5090 / RTX 5060 / B200 / GB200 support. Earlier 1.23/1.24
+# regressed sm_120 (cudaErrorNoKernelImageForDevice on Blackwell); 1.25.1
+# is the current stable. Live caveat: open issue #27621 (silent threading
+# deadlock on sm_120 with PTX JIT + GIL) means Blackwell tier needs smoke
+# validation before declaring fully production-ready.
+#
 # Apr-14 post-mortem: omitting cuDNN/cuBLAS pulls was the cause of silent
 # CPU fallback in v0.1 benchmarks. Same shape of bug at the TRT layer is
 # why v0.7 ships tensorrt by default in [gpu].
 gpu = [
-    "onnxruntime-gpu>=1.20,<1.24",
-    "nvidia-cudnn-cu12>=9.0,<10.0",
-    "nvidia-cublas-cu12>=12.0,<13.0",
+    "onnxruntime-gpu>=1.25.1",
+    "nvidia-cudnn-cu12>=9.5,<10.0",
+    "nvidia-cublas-cu12>=12.6,<13.0",
     # New in v0.7: provides libnvinfer.so.10 for ORT-TRT EP
     "tensorrt>=10.0,<11; sys_platform == 'linux'",
 ]
 # Optional: skip tensorrt for users who explicitly don't want the 2 GB install
 # footprint. They get ORT-CUDA EP only (~5x slower than TRT EP on transformers).
 gpu-min = [
-    "onnxruntime-gpu>=1.20,<1.24",
-    "nvidia-cudnn-cu12>=9.0,<10.0",
-    "nvidia-cublas-cu12>=12.0,<13.0",
+    "onnxruntime-gpu>=1.25.1",
+    "nvidia-cudnn-cu12>=9.5,<10.0",
+    "nvidia-cublas-cu12>=12.6,<13.0",
 ]
 # HTTP serve stack. Includes onnxruntime (CPU) so `pip install reflex-vla[serve]`
 # gives you a working server out of the box. For GPU, use `[serve,gpu]` to pull in
