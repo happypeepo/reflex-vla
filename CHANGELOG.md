@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.9.0 — 2026-05-07
+
+**Three Phase 1.5 perf-compound + observability features ship.** Action-similarity fast-path closes redundant expert calls (FlashVLA), customer-trace-archive lands query/summary CLI on recorded /act traces, data-labeling-pipeline gets uncertainty scoring (the orthogonal third axis to success + quality).
+
+### Added
+
+- **`reflex serve --action-similarity-threshold <L2>` + `--max-similar-skips <N>`** (FlashVLA, arxiv 2505.21200). When the expert produces an action chunk L2-similar to the previously-emitted one, the next `predict_action_chunk()` skips the expert and reuses the cached chunk. Default OFF (`0.0` = disabled); paper default `0.05`. Capped at `--max-similar-skips 3` consecutive cached returns to bound drift on slow-changing scenes. Wired only on Pi05DecomposedServer (decomposed pi0.5); legacy + monolithic exports ignore the flags silently.
+  - **Production validated 2026-05-07** on Modal A100 with real pi0.5 decomposed export: 9 skips / 20 calls = 45% skip rate, 20/20 bit-exact actions vs disabled mode, **1.24× wall-clock speedup** (2.7s → 2.2s with deterministic identical inputs).
+  - Surfaces skip events via new `reflex_action_skip_total` Prometheus counter at `/metrics`.
+  - 19 unit tests + 8 mock-integration tests covering enabled/disabled, threshold gating, max_skips cap, cached_actions returns copy, episode reset, stats accounting.
+
+- **`reflex traces query` + `reflex traces summary` subcommands** (customer-trace-archive v1). Filter and aggregate JSONL traces written by `reflex serve --record <dir>`.
+  - `reflex traces query --task X --status failed --since 7d --output failures.json` — filter by time window / task substring / `success`/`failed`/`any` status / `model_hash` substring + export to JSON or CSV.
+  - `reflex traces summary --by {task,model,day} --since 7d` — aggregate count + success_rate + latency p50/p95/p99/max per bucket. Output rich table (default), JSON or CSV via `--output FILE` + auto-detected from suffix.
+  - Built directly on existing JSONL storage; parquet+DuckDB index migration deferred to v2.
+  - 20 unit tests + manual end-to-end smoke validated.
+
+- **`uncertainty_score()` + `classify_episode_value()` in `reflex.curate.quality`** (data-labeling-pipeline subsystem 3). N-pass inference variance for flow-matching VLAs (pi0/pi0.5/SmolVLA). Per-dim variance across N samples → normalize by per-dim observed range² → mean across dims → mean across steps → score in [0, 1]. Components dict surfaces `argmax_step` + `argmax_dim` for debugging.
+  - 4-quadrant classifier per the spec's training-value framing: high-uncertainty + success → `informative_edge_case` (highest value); high-uncertainty + failure → `edge_case_to_correct`; low + success → `redundant_known_good`; low + failure → `model_blind_spot`.
+  - Pure-numpy. Sample-generation is the caller's responsibility (decoupled from inference). Wiring into a `reflex traces uncertainty` CLI deferred to v2.
+  - 17 unit tests covering identical-samples → 0, maximally-divergent → ~0.33, constant-dim contributes 0, monotone in variance, argmax pointers correct, parquet-ready `to_dict()`, all 4 classifier quadrants.
+
+### Fixed
+
+- **`ActionFastPath.observe()` stats counter** now increments `expert_calls` regardless of `enabled` state. Previously the counter early-returned at `if not self._enabled: return`, so disabled-mode runs reported `expert_calls=0` even though the expert ran on each call. Caught by 2026-05-07 production smoke. New regression test.
+
+### Phase 1 status
+
+**Phase 1 closed 2026-05-07** with 16/16 features shipped or explicitly killed. a2c2-correction marked `phase_1_shipped` (Phase 1 fix at OFF parity validated 2026-04-29; Phase 2 ON > OFF positive delta filed as 3 successor stubs: FASTER, TAS, Legato — research revisit committed). Phase 1.5 perf-compound queue done — language-layer-pruning + cross-request-pipelining deferred to Phase 2 with explicit re-open triggers.
+
 ## v0.8.0 — 2026-05-02
 
 **Per-step expert ONNX export feature ships.** New `per_step_expert=True` flag on `export_pi05_decomposed` produces an `expert_denoise.onnx` that takes `(x_t, t, past_kv)` and returns `v_t` (single Euler step velocity), instead of the default baked-loop ONNX that takes `noise` and returns the fully-denoised action chunk. The per-step shape unblocks RTC + per-step caching (Dexmal 3-stage) by exposing the denoise loop in Python rather than baking it into the ONNX graph.
