@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.9.1 — 2026-05-07
+
+**Fix: stale `__version__` constant.** v0.9.0's `pyproject.toml` was bumped to 0.9.0 but `src/reflex/__init__.py` still hardcoded `__version__ = "0.8.0"`. The wheel metadata (`pip show`) correctly reported 0.9.0 — only the human-readable upgrade-check nag + `reflex --version` print misreported. No functional bug; all v0.9.0 features (action-similarity-fast-path, customer-trace-archive, uncertainty scoring) shipped working code.
+
 ## v0.9.0 — 2026-05-07
 
 **Three Phase 1.5 perf-compound + observability features ship.** Action-similarity fast-path closes redundant expert calls (FlashVLA), customer-trace-archive lands query/summary CLI on recorded /act traces, data-labeling-pipeline gets uncertainty scoring (the orthogonal third axis to success + quality).
