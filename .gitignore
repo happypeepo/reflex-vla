@@ -39,3 +39,10 @@ reflex_context/
 # Stray cruft from prior accidents — preempt staging them
 =*
 LICENSE.bak*
+*.pyc
+
+# Cloudflare Wrangler local state (per-worker .wrangler/ dirs hold local D1
+# replicas + dev-server state; never commit)
+.wrangler/
+**/.wrangler/
+**/wrangler.toml.bak
