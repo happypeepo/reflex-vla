@@ -58,7 +58,7 @@ jobs:
               "This is a great place to start contributing 🎉",
               "",
               "Before you begin, please read our contributing guide:",
-              "👉 https://github.com/" + owner + "/" + repo + "/blob/main/CONTRIBUTING.md",,
+              "👉 https://github.com/" + owner + "/" + repo + "/blob/main/CONTRIBUTING.md",
               "",
               "### Getting started",
               "- Comment that you're working on it",
